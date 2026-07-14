@@ -23,6 +23,11 @@
     <Resource Include="Assets\AppIcon.png" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="CreateDesktopShortcut.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="创建桌面快捷方式.cmd" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <PropertyGroup>
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
   </PropertyGroup>
