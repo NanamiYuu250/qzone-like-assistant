@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using QzoneLikeAssistant;
 
 var settings = new AppSettings();
@@ -6,7 +7,22 @@ settings.Normalize();
 Require(settings.ScanSeconds == 1, "默认扫描间隔应为 1 秒");
 Require(settings.MinActionSeconds == 3, "默认点赞冷却应为 3 秒");
 Require(settings.DailyLimit == 300, "默认每日上限应为 300 次");
+Require(settings.AutoRefreshEnabled, "默认应开启安全自动刷新");
+Require(settings.AutoRefreshMinutes == 5, "默认自动刷新间隔应为 5 分钟");
 Require(settings.TodayAttemptCount == 0, "每日尝试数默认应为 0");
+var version5Settings = new AppSettings
+{
+    SettingsVersion = 5,
+    ScanSeconds = 2,
+    MinActionSeconds = 8,
+    DailyLimit = 30
+};
+version5Settings.Normalize();
+Require(version5Settings.SettingsVersion == 6, "V5 设置应只提升版本号");
+Require(version5Settings.ScanSeconds == 2 &&
+        version5Settings.MinActionSeconds == 8 &&
+        version5Settings.DailyLimit == 30,
+    "V5 用户自定义扫描、冷却和每日上限不得被旧迁移覆盖");
 settings.TodayCount = 3;
 settings.Normalize();
 Require(settings.TodayAttemptCount == 3, "旧设置迁移后尝试数不得低于确认成功数");
@@ -62,6 +78,47 @@ Require(!reloadedCooldownSettings.IsActionCooldownElapsed(cooldownAt.AddSeconds(
     "重新加载设置后仍不得绕过冷却");
 Directory.Delete(cooldownDirectory, true);
 
+var previousContexts = new RefreshContextCheckpoint[]
+{
+    new(true, ["main-a", "main-b"]),
+    new(false, ["frame-a", "frame-b"]),
+    new(false, ["frame-c", "frame-d"])
+};
+var currentContexts = new RefreshContextCheckpoint[]
+{
+    new(true, ["main-a", "main-b"]),
+    new(false, ["frame-c", "frame-d"]),
+    new(false, ["frame-a", "frame-b"])
+};
+var contextMatches = RefreshContextMatcher.Match(previousContexts, currentContexts);
+Require(contextMatches.Count == 3 &&
+        contextMatches[0] == 0 && contextMatches[1] == 2 && contextMatches[2] == 1,
+    "刷新上下文应按独立稳定锚点匹配，不能依赖 frame 顺序");
+Require(RefreshContextMatcher.Match(
+        [new(false, ["only-one"])],
+        [new(false, ["only-one"])]).Count == 0,
+    "只有一个共同锚点时应保守地视为上下文不明确");
+Require(RefreshContextMatcher.Match(
+        [new(false, ["same-a", "same-b"]), new(false, ["same-a", "same-b"])],
+        [new(false, ["same-a", "same-b"])]).Count == 0,
+    "多个 frame 都可匹配时不得选取歧义锚点");
+Require(RefreshContextMatcher.Match(
+        [new(true, ["cross-a", "cross-b"])],
+        [new(false, ["cross-a", "cross-b"])]).Count == 0,
+    "主页面锚点不得跨上下文匹配到 frame");
+
+var navigation = new NavigationGeneration();
+navigation.Start(100);
+navigation.Start(101);
+Require(!navigation.TryComplete(100) && navigation.InProgress && navigation.CurrentId == 101,
+    "旧导航的完成事件不得清除最新导航状态");
+Require(navigation.TryComplete(101) && !navigation.InProgress,
+    "最新导航完成后必须解除扫描暂停");
+navigation.MarkPending();
+navigation.Start(102);
+Require(navigation.TryComplete(102) && !navigation.InProgress,
+    "孤立的最新 OperationCanceled 应能按导航代次解除扫描暂停");
+
 var scripts = new Dictionary<string, string>
 {
     ["start-attempt"] = LikeScript.BuildStartAttempt(settings, bounded, true, "new", "tracker-test", "token-test"),
@@ -69,6 +126,8 @@ var scripts = new Dictionary<string, string>
     ["tracker"] = LikeScript.BuildInitializeTracker("tracker-test", "token-test"),
     ["tracker-snapshot"] = LikeScript.BuildGetTrackerSnapshot("tracker-test", "token-test"),
     ["tracker-arm"] = LikeScript.BuildArmTracker("tracker-test", "token-test"),
+    ["refresh-capture"] = LikeScript.BuildCaptureRefreshKeys(),
+    ["refresh-apply-arm"] = LikeScript.BuildApplyAndArmRefreshKeys(["old-1"], "tracker-test", "token-test"),
     ["invalidate"] = LikeScript.BuildInvalidateAutomation("token-test"),
     ["backfill"] = LikeScript.BuildBackfillScroll("backfill-test", "token-test"),
     ["return-top"] = LikeScript.BuildReturnToTop("backfill-test")
@@ -85,8 +144,16 @@ Require(confirmed is { Completed: true, Clicked: true, Attempted: true, Key: "k"
 var started = LikeScript.ParseStartResult(
     """{"started":true,"trackerMissing":false,"attemptId":"a","error":null}""");
 Require(started is { Started: true, AttemptId: "a" }, "同步启动结果必须能被解析");
+var refreshDiff = LikeScript.ParseRefreshDiffResult(
+    """{"valid":true,"anchorFound":true,"newCount":2,"armed":true}""");
+Require(refreshDiff is { Valid: true, AnchorFound: true, NewCount: 2, Armed: true }, "刷新差异结果必须能被解析");
+Require(!LikeScript.BuildCaptureRefreshKeys().Contains("innerText", StringComparison.Ordinal) &&
+        !LikeScript.BuildApplyAndArmRefreshKeys(["old-1"], "tracker-test", "token-test")
+            .Contains("innerText", StringComparison.Ordinal),
+    "刷新锚点脚本不得退化到不稳定的正文文本");
+await CheckRefreshDiffBehaviorAsync();
 
-Console.WriteLine("Smoke tests passed: defaults, persistent restart cooldown, stopped-race quota, session invalidation, FIFO eviction, result parsing, generated JavaScript syntax.");
+Console.WriteLine("Smoke tests passed: defaults, V5 migration preservation, navigation generations, context-safe refresh matching, atomic refresh arm, persistent restart cooldown, stopped-race quota, session invalidation, FIFO eviction, generated JavaScript syntax.");
 
 static void Require(bool condition, string message)
 {
@@ -114,4 +181,99 @@ static async Task CheckJavaScriptAsync(string name, string script)
     var error = await errorTask;
     if (process.ExitCode != 0)
         throw new InvalidOperationException($"JavaScript {name} 语法检查失败：{error}");
+}
+
+static async Task CheckRefreshDiffBehaviorAsync()
+{
+    const string trackerId = "refresh-smoke-tracker";
+    const string token = "refresh-smoke-token";
+    var captureOutput = await RunJavaScriptAsync(BuildDomHarness(
+        ["old-a", "old-b"], trackerId, token, LikeScript.BuildCaptureRefreshKeys()));
+    using var captureJson = JsonDocument.Parse(captureOutput);
+    var captured = captureJson.RootElement.GetProperty("result").EnumerateArray()
+        .Select(element => element.GetString()).ToArray();
+    Require(captured.SequenceEqual(["old-a", "old-b"]), "刷新前必须按页面顺序保存顶部锚点");
+
+    var applyOutput = await RunJavaScriptAsync(BuildDomHarness(
+        ["new-c", "old-a", "old-b"], trackerId, token,
+        LikeScript.BuildApplyAndArmRefreshKeys(["old-a", "old-b"], trackerId, token)));
+    using var applyJson = JsonDocument.Parse(applyOutput);
+    var result = applyJson.RootElement.GetProperty("result");
+    Require(result.GetProperty("valid").GetBoolean() &&
+            result.GetProperty("anchorFound").GetBoolean() &&
+            result.GetProperty("newCount").GetInt32() == 1 &&
+            result.GetProperty("armed").GetBoolean() &&
+            applyJson.RootElement.GetProperty("trackerArmed").GetBoolean(),
+        "刷新后必须只识别旧锚点之前的新增动态");
+    var newKeys = applyJson.RootElement.GetProperty("newKeys").EnumerateArray()
+        .Select(element => element.GetString()).ToArray();
+    Require(newKeys.SequenceEqual(["new-c"]), "旧锚点及其后的历史动态不得进入新动态队列");
+
+    var missingOutput = await RunJavaScriptAsync(BuildDomHarness(
+        ["unrelated-x"], trackerId, token,
+        LikeScript.BuildApplyAndArmRefreshKeys(["old-a", "old-b"], trackerId, token)));
+    using var missingJson = JsonDocument.Parse(missingOutput);
+    var missing = missingJson.RootElement.GetProperty("result");
+    Require(!missing.GetProperty("anchorFound").GetBoolean() &&
+            missing.GetProperty("newCount").GetInt32() == 0 &&
+            missing.GetProperty("armed").GetBoolean() &&
+            missingJson.RootElement.GetProperty("trackerArmed").GetBoolean() &&
+            missingJson.RootElement.GetProperty("newKeys").GetArrayLength() == 0,
+        "找不到旧锚点时必须把当前页面全部按历史内容保护");
+}
+
+static string BuildDomHarness(
+    string[] keys,
+    string trackerId,
+    string token,
+    string expression)
+{
+    var keysJson = JsonSerializer.Serialize(keys);
+    var trackerJson = JsonSerializer.Serialize(trackerId);
+    var tokenJson = JsonSerializer.Serialize(token);
+    return $$"""
+    const keys = {{keysJson}};
+    const items = keys.map(key => ({
+      getAttribute: name => name === 'data-tid' ? key : null,
+      id: '', innerText: key
+    }));
+    const buttons = items.map(item => ({ closest: () => item }));
+    globalThis.document = { querySelectorAll: () => buttons };
+    globalThis.__qzaAutomationSession = {{tokenJson}};
+    globalThis.__qzaFeedTracker = {
+      trackerId: {{trackerJson}}, automationToken: {{tokenJson}},
+      newKeys: new Set(), newOrder: [], bootstrapComplete: false
+    };
+    const result = {{expression}};
+    console.log(JSON.stringify({
+      result,
+      newKeys: [...globalThis.__qzaFeedTracker.newKeys],
+      trackerArmed: globalThis.__qzaFeedTracker.bootstrapComplete === true
+    }));
+    """;
+}
+
+static async Task<string> RunJavaScriptAsync(string script)
+{
+    var startInfo = new ProcessStartInfo("node")
+    {
+        UseShellExecute = false,
+        RedirectStandardInput = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        CreateNoWindow = true
+    };
+    startInfo.ArgumentList.Add("-");
+    using var process = Process.Start(startInfo) ??
+        throw new InvalidOperationException("无法启动 Node.js 执行刷新差异测试");
+    var outputTask = process.StandardOutput.ReadToEndAsync();
+    var errorTask = process.StandardError.ReadToEndAsync();
+    await process.StandardInput.WriteAsync(script);
+    process.StandardInput.Close();
+    await process.WaitForExitAsync();
+    var output = await outputTask;
+    var error = await errorTask;
+    if (process.ExitCode != 0)
+        throw new InvalidOperationException($"刷新差异 JavaScript 执行失败：{error}");
+    return output.Trim();
 }

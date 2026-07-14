@@ -12,5 +12,7 @@
     <Compile Include="..\..\AttemptQuotaLedger.cs" Link="AttemptQuotaLedger.cs" />
     <Compile Include="..\..\BoundedKeySet.cs" Link="BoundedKeySet.cs" />
     <Compile Include="..\..\LikeScript.cs" Link="LikeScript.cs" />
+    <Compile Include="..\..\NavigationGeneration.cs" Link="NavigationGeneration.cs" />
+    <Compile Include="..\..\RefreshContextMatcher.cs" Link="RefreshContextMatcher.cs" />
   </ItemGroup>
 </Project>

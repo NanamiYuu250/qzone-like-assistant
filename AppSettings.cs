@@ -5,12 +5,14 @@ namespace QzoneLikeAssistant;
 
 internal sealed class AppSettings
 {
-    private const int CurrentSettingsVersion = 5;
+    private const int CurrentSettingsVersion = 6;
 
     public int SettingsVersion { get; set; }
     public int ScanSeconds { get; set; } = 1;
     public int MinActionSeconds { get; set; } = 3;
     public int DailyLimit { get; set; } = 300;
+    public bool AutoRefreshEnabled { get; set; } = true;
+    public int AutoRefreshMinutes { get; set; } = 5;
     public bool BackfillOnStart { get; set; } = true;
     public int BackfillLikeLimit { get; set; } = 10;
     public string IncludeKeywords { get; set; } = "";
@@ -22,17 +24,19 @@ internal sealed class AppSettings
 
     public void Normalize()
     {
-        if (SettingsVersion < CurrentSettingsVersion)
+        var sourceVersion = SettingsVersion;
+        if (sourceVersion < 5)
         {
             if (ScanSeconds == 2) ScanSeconds = 1;
             if (MinActionSeconds == 8) MinActionSeconds = 3;
             if (DailyLimit == 30) DailyLimit = 300;
-            SettingsVersion = CurrentSettingsVersion;
         }
+        if (sourceVersion < CurrentSettingsVersion) SettingsVersion = CurrentSettingsVersion;
 
         ScanSeconds = Math.Clamp(ScanSeconds, 1, 60);
         MinActionSeconds = Math.Clamp(MinActionSeconds, 1, 600);
         DailyLimit = Math.Clamp(DailyLimit, 1, 5000);
+        AutoRefreshMinutes = Math.Clamp(AutoRefreshMinutes, 1, 60);
         BackfillLikeLimit = Math.Clamp(BackfillLikeLimit, 1, 100);
         TodayAttemptCount = Math.Max(TodayAttemptCount, TodayCount);
         if (LastActionAtUtc != DateTime.MinValue)

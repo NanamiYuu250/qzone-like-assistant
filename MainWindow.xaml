@@ -93,6 +93,35 @@
                                 </Grid>
                                 <Border Height="1" Background="#F2E9EB" />
 
+                                <Grid Margin="0,11">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="自动刷新" Foreground="#493B42" FontSize="13" />
+                                        <TextBlock Text="按顶部动态锚点安全识别刷新结果" Foreground="#A49198" FontSize="10" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="AutoRefreshEnabledBox" Grid.Column="1" Content="开启"
+                                              HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                </Grid>
+                                <Border Height="1" Background="#F2E9EB" />
+
+                                <Grid Margin="0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="82" />
+                                        <ColumnDefinition Width="28" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="刷新间隔" Foreground="#493B42" FontSize="13" />
+                                        <TextBlock Text="重新向 QQ 空间请求顶部动态" Foreground="#A49198" FontSize="10" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                    <TextBox x:Name="AutoRefreshMinutesBox" Grid.Column="1" TextAlignment="Right" />
+                                    <TextBlock Grid.Column="2" Text="分" Foreground="#9B8990" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                                </Grid>
+                                <Border Height="1" Background="#F2E9EB" />
+
                                 <Grid Margin="0,7">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
@@ -198,7 +227,7 @@
                     <Grid Margin="28,11,28,18">
                         <TextBlock Text="QZONE ASSISTANT" Foreground="#B3A2A8" FontSize="9" />
                         <Border HorizontalAlignment="Right" CornerRadius="8" Background="#F3EAEC" Padding="7,3">
-                            <TextBlock Text="v1.9" Foreground="#8E7B82" FontSize="9" />
+                            <TextBlock Text="v1.10" Foreground="#8E7B82" FontSize="9" />
                         </Border>
                     </Grid>
                 </Border>

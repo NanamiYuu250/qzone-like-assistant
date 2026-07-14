@@ -30,7 +30,7 @@ internal static class Program
             try
             {
                 await RunIntegrationTestAsync(browser);
-                Console.WriteLine("WebView2 integration test passed: synchronous attempt, polling, tracker-missing, backfill reconciliation, explicit host baseline arm.");
+                Console.WriteLine("WebView2 integration test passed: synchronous attempt, polling, tracker-missing, backfill reconciliation, explicit host baseline arm, atomic refresh-anchor diff and arm.");
                 exitCode = 0;
             }
             catch (Exception exception)
@@ -193,6 +193,80 @@ internal static class Program
         Require(LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
             "globalThis.__qzaFeedTracker.newKeys.has('after-bootstrap-new')")),
             "宿主显式武装后的顶部插入项应进入新动态队列");
+
+        await browser.ExecuteScriptAsync("""
+            document.body.innerHTML = `
+              <article class="feed_item" data-tid="refresh-old-a">
+                <p>刷新前顶部动态 A</p><button title="赞" aria-pressed="false">赞</button>
+              </article>
+              <article class="feed_item" data-tid="refresh-old-b">
+                <p>刷新前顶部动态 B</p><button title="赞" aria-pressed="false">赞</button>
+              </article>`;
+            true;
+            """);
+        const string beforeRefreshTrackerId = "before-refresh";
+        LikeScript.ParseInteger(await browser.ExecuteScriptAsync(
+            LikeScript.BuildInitializeTracker(beforeRefreshTrackerId, token)));
+        var refreshCheckpoint = LikeScript.ParseStringArray(await browser.ExecuteScriptAsync(
+            LikeScript.BuildCaptureRefreshKeys()));
+        Require(refreshCheckpoint.SequenceEqual(["refresh-old-a", "refresh-old-b"]),
+            $"刷新前应按顶部顺序保存动态锚点：{string.Join(',', refreshCheckpoint)}");
+
+        await browser.ExecuteScriptAsync("""
+            document.body.innerHTML = `
+              <article class="feed_item" data-tid="refresh-new-c">
+                <p>刷新后新到达动态 C</p><button title="赞" aria-pressed="false">赞</button>
+              </article>
+              <article class="feed_item" data-tid="refresh-old-a">
+                <p>刷新前顶部动态 A</p><button title="赞" aria-pressed="false">赞</button>
+              </article>
+              <article class="feed_item" data-tid="refresh-old-b">
+                <p>刷新前顶部动态 B</p><button title="赞" aria-pressed="false">赞</button>
+              </article>`;
+            true;
+            """);
+        const string afterRefreshTrackerId = "after-refresh";
+        LikeScript.ParseInteger(await browser.ExecuteScriptAsync(
+            LikeScript.BuildInitializeTracker(afterRefreshTrackerId, token)));
+        var refreshDiff = LikeScript.ParseRefreshDiffResult(await browser.ExecuteScriptAsync(
+            LikeScript.BuildApplyAndArmRefreshKeys(refreshCheckpoint, afterRefreshTrackerId, token)));
+        Require(refreshDiff is { Valid: true, AnchorFound: true, NewCount: 1, Armed: true },
+            $"刷新后只应识别旧锚点之前的一条新增动态：{refreshDiff}");
+        Require(LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+            "globalThis.__qzaFeedTracker.newKeys.has('refresh-new-c')")),
+            "旧锚点之前的动态必须进入新动态队列");
+        Require(!LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+            "globalThis.__qzaFeedTracker.newKeys.has('refresh-old-a') || globalThis.__qzaFeedTracker.newKeys.has('refresh-old-b')")),
+            "旧锚点及其后的历史动态不得进入新动态队列");
+
+        await browser.ExecuteScriptAsync("""
+            document.body.innerHTML = `
+              <article class="feed_item" data-tid="unrelated-x">
+                <p>完全不同的页面内容</p><button title="赞" aria-pressed="false">赞</button>
+              </article>`;
+            true;
+            """);
+        const string missingAnchorTrackerId = "missing-refresh-anchor";
+        LikeScript.ParseInteger(await browser.ExecuteScriptAsync(
+            LikeScript.BuildInitializeTracker(missingAnchorTrackerId, token)));
+        var missingAnchorDiff = LikeScript.ParseRefreshDiffResult(await browser.ExecuteScriptAsync(
+            LikeScript.BuildApplyAndArmRefreshKeys(refreshCheckpoint, missingAnchorTrackerId, token)));
+        Require(missingAnchorDiff is { Valid: true, AnchorFound: false, NewCount: 0, Armed: true },
+            "刷新后找不到旧锚点时必须保守地把整页视为历史内容");
+        Require(!LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+            "globalThis.__qzaFeedTracker.newKeys.has('unrelated-x')")),
+            "无旧锚点的页面内容不得被误判为新动态");
+
+        await browser.ExecuteScriptAsync("""
+            document.body.innerHTML = `
+              <article class="feed_item">
+                <p>只有正文、没有稳定 ID 的动态</p><button title="赞" aria-pressed="false">赞</button>
+              </article>`;
+            true;
+            """);
+        Require(LikeScript.ParseStringArray(await browser.ExecuteScriptAsync(
+                LikeScript.BuildCaptureRefreshKeys())).Count == 0,
+            "没有 data-tid/data-feedskey/data-unikey/id 时不得用正文生成刷新锚点");
 
         await browser.ExecuteScriptAsync("globalThis.__qzaFeedTracker = null");
         var missing = LikeScript.ParseStartResult(await browser.ExecuteScriptAsync(

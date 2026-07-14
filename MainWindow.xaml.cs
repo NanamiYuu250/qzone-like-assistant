@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     private readonly BoundedKeySet processedKeys = new(1000);
     private readonly AutomationSession automationSession = new();
     private readonly AttemptQuotaLedger attemptQuotaLedger = new();
+    private readonly NavigationGeneration navigationGeneration = new();
     private AppSettings settings;
     private bool running;
     private bool scanning;
@@ -41,6 +42,14 @@ public partial class MainWindow : Window
     private string backfillSessionId = "";
     private string trackerId = "";
     private string networkDiagnostic = "";
+    private DateTime nextAutoRefreshAtUtc = DateTime.MaxValue;
+    private bool refreshInProgress;
+    private IReadOnlyList<RefreshContextCheckpoint> pendingRefreshContexts = [];
+
+    private sealed record RefreshExecutionContext(
+        bool IsMain,
+        CoreWebView2Frame? Frame,
+        IReadOnlyList<string> Keys);
 
     private string SettingsPath => Path.Combine(appDataDirectory, "settings.json");
     private string BrowserDataPath => Path.Combine(appDataDirectory, "WebView2");
@@ -80,6 +89,8 @@ public partial class MainWindow : Window
             {
                 if (IsAllowedAppUrl(args.Uri))
                 {
+                    navigationGeneration.Start(args.NavigationId);
+                    StartNavigationWatchdog();
                     if (Uri.TryCreate(args.Uri, UriKind.Absolute, out var target))
                     {
                         UpdateStatus(running ? "运行中" : "正在连接", $"正在打开 {target.Host}", running);
@@ -92,6 +103,7 @@ public partial class MainWindow : Window
             };
             core.NavigationCompleted += (_, args) =>
             {
+                if (!navigationGeneration.TryComplete(args.NavigationId)) return;
                 if (args.IsSuccess)
                 {
                     navigationWatchdog.Stop();
@@ -101,7 +113,10 @@ public partial class MainWindow : Window
                     {
                         BeginBaselineRearm();
                     }
-                    UpdateStatus(running ? "运行中" : "准备就绪", "页面已加载，请登录并进入好友动态", running);
+                    UpdateStatus(running ? "运行中" : "准备就绪",
+                        refreshInProgress
+                            ? "页面已刷新，正在安全对比顶部动态"
+                            : "页面已加载，请登录并进入好友动态", running);
                 }
                 else
                 {
@@ -109,6 +124,13 @@ public partial class MainWindow : Window
                     // QQ login uses several redirects, so this is not a terminal failure.
                     if (args.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled)
                     {
+                        navigationWatchdog.Stop();
+                        if (refreshInProgress)
+                        {
+                            refreshInProgress = false;
+                            pendingRefreshContexts = [];
+                            ScheduleNextRefresh();
+                        }
                         Browser.Visibility = Visibility.Visible;
                         BrowserErrorOverlay.Visibility = Visibility.Collapsed;
                         UpdateStatus(running ? "运行中" : "正在跳转", "QQ 登录正在继续跳转", running);
@@ -116,6 +138,9 @@ public partial class MainWindow : Window
                     }
 
                     navigationWatchdog.Stop();
+                    refreshInProgress = false;
+                    pendingRefreshContexts = [];
+                    ScheduleNextRefresh();
                     Browser.Visibility = Visibility.Hidden;
                     BrowserErrorOverlay.Visibility = Visibility.Visible;
                     BrowserErrorText.Text = string.IsNullOrWhiteSpace(networkDiagnostic)
@@ -125,7 +150,6 @@ public partial class MainWindow : Window
                 }
             };
             core.FrameCreated += (_, args) => TrackFrame(args.Frame);
-            StartNavigationWatchdog();
             core.Navigate(QzoneHome);
         }
         catch (Exception ex)
@@ -170,6 +194,9 @@ public partial class MainWindow : Window
         backfillPassPending = false;
         backfillPassAtTop = false;
         BeginBaselineRearm();
+        refreshInProgress = false;
+        pendingRefreshContexts = [];
+        ScheduleNextRefresh();
         scanTimer.Interval = TimeSpan.FromSeconds(settings.ScanSeconds);
         scanTimer.Start();
         ToggleButton.Content = "停止自动点赞";
@@ -183,6 +210,9 @@ public partial class MainWindow : Window
         var stoppedToken = automationSession.Stop();
         running = false;
         scanTimer.Stop();
+        refreshInProgress = false;
+        pendingRefreshContexts = [];
+        nextAutoRefreshAtUtc = DateTime.MaxValue;
         if (!string.IsNullOrWhiteSpace(stoppedToken)) _ = InvalidateAutomationInPagesAsync(stoppedToken);
         if (backfillPassPending) _ = ReturnToTopAsync();
         backfillPassPending = false;
@@ -199,20 +229,24 @@ public partial class MainWindow : Window
     private async Task ScanOnceAsync()
     {
         var run = automationSession.Current;
-        if (!IsSessionActive(run) || scanning || Browser.CoreWebView2 is null) return;
+        if (!IsSessionActive(run) || scanning || navigationGeneration.InProgress || Browser.CoreWebView2 is null) return;
         settings.ResetStatsIfNeeded();
         if (settings.TodayAttemptCount >= settings.DailyLimit)
         {
             StopAutomation("已达到今日点赞上限");
             return;
         }
-        if (!settings.IsActionCooldownElapsed(DateTime.UtcNow)) return;
-
         var token = run.Token;
         scanning = true;
         try
         {
             if (!IsSessionActive(run)) return;
+            if (ShouldAutoRefresh())
+            {
+                await RefreshFeedAsync(run, force: false);
+                return;
+            }
+            if (!settings.IsActionCooldownElapsed(DateTime.UtcNow)) return;
             var isBackfillPass = backfillPassPending;
             if (!isBackfillPass)
             {
@@ -482,17 +516,48 @@ public partial class MainWindow : Window
             return;
         }
 
-        var armed = await ArmFeedTrackersAsync(run, expectedTrackerId);
-        if (!IsSessionActive(run) || trackerId != expectedTrackerId) return;
-        if (!armed)
+        LikeScript.RefreshDiffResult? refreshDiff = null;
+        if (refreshInProgress)
         {
-            BeginBaselineRearm();
-            UpdateStatus("运行中", "页面在基线武装时发生变化，正在重新建立安全基线", true);
-            return;
+            refreshDiff = await ApplyAndArmRefreshContextsAsync(run, expectedTrackerId);
+            if (!IsSessionActive(run) || trackerId != expectedTrackerId) return;
+            if (refreshDiff is null)
+            {
+                BeginBaselineRearm();
+                UpdateStatus("运行中", "刷新结果对比中断，正在重新建立安全基线", true);
+                return;
+            }
+        }
+
+        if (!refreshInProgress)
+        {
+            var armed = await ArmFeedTrackersAsync(run, expectedTrackerId);
+            if (!IsSessionActive(run) || trackerId != expectedTrackerId) return;
+            if (!armed)
+            {
+                BeginBaselineRearm();
+                UpdateStatus("运行中", "页面在基线武装时发生变化，正在重新建立安全基线", true);
+                return;
+            }
         }
 
         baselineReady = true;
-        UpdateStatus("运行中", "安全基线已武装，之后顶部新增的条目才视为新动态", true);
+        if (refreshInProgress)
+        {
+            refreshInProgress = false;
+            pendingRefreshContexts = [];
+            ScheduleNextRefresh();
+            UpdateStatus("运行中", refreshDiff switch
+            {
+                { AnchorFound: true, NewCount: > 0 } => $"自动刷新完成，识别到 {refreshDiff.NewCount} 条新增动态",
+                { AnchorFound: true } => "自动刷新完成，暂未发现新增动态",
+                _ => "自动刷新完成，但未找到旧锚点；本轮内容已按历史动态保护"
+            }, true);
+        }
+        else
+        {
+            UpdateStatus("运行中", "安全基线已武装，之后顶部新增的条目才视为新动态", true);
+        }
     }
 
     private async Task<bool> InitializeFeedTrackersAsync(AutomationRun run, string expectedTrackerId)
@@ -595,6 +660,153 @@ public partial class MainWindow : Window
         }
 
         return allArmed;
+    }
+
+    private bool ShouldAutoRefresh() => settings.AutoRefreshEnabled && baselineReady &&
+        !refreshInProgress && !backfillPassPending && !CanContinueBackfill() &&
+        DateTime.UtcNow >= nextAutoRefreshAtUtc;
+
+    private void ScheduleNextRefresh()
+    {
+        nextAutoRefreshAtUtc = running && settings.AutoRefreshEnabled
+            ? DateTime.UtcNow.AddMinutes(settings.AutoRefreshMinutes)
+            : DateTime.MaxValue;
+    }
+
+    private async Task RefreshFeedAsync(AutomationRun run, bool force)
+    {
+        if (!IsSessionActive(run) || Browser.CoreWebView2 is null || refreshInProgress) return;
+        await ReturnToTopAsync(run);
+        if (!IsSessionActive(run)) return;
+        await Task.Delay(150);
+        if (!IsSessionActive(run)) return;
+
+        var checkpointContexts = await CaptureRefreshContextsAsync(run);
+        if (!IsSessionActive(run)) return;
+        var checkpointKeyCount = checkpointContexts.Sum(context => context.Keys.Count);
+        if (checkpointKeyCount == 0 && !force)
+        {
+            nextAutoRefreshAtUtc = DateTime.UtcNow.AddMinutes(1);
+            UpdateStatus("运行中", "自动刷新等待好友动态顶部锚点", true);
+            return;
+        }
+
+        pendingRefreshContexts = checkpointContexts
+            .Select(context => new RefreshContextCheckpoint(context.IsMain, context.Keys))
+            .ToArray();
+        refreshInProgress = true;
+        backfillScrollsRemaining = 0;
+        backfillPassPending = false;
+        backfillPassAtTop = false;
+        UpdateStatus("正在刷新", checkpointKeyCount > 0
+            ? $"已保存 {checkpointKeyCount} 个顶部锚点，正在重新加载 QQ 空间"
+            : "未找到动态锚点，正在执行安全刷新", true);
+        StartNavigationWatchdog();
+        try
+        {
+            navigationGeneration.MarkPending();
+            Browser.CoreWebView2.Reload();
+        }
+        catch
+        {
+            navigationWatchdog.Stop();
+            navigationGeneration.Reset();
+            refreshInProgress = false;
+            pendingRefreshContexts = [];
+            ScheduleNextRefresh();
+            UpdateStatus("运行中", "刷新请求失败，稍后重试", true);
+        }
+    }
+
+    private async Task<IReadOnlyList<RefreshExecutionContext>> CaptureRefreshContextsAsync(AutomationRun run)
+    {
+        var script = LikeScript.BuildCaptureRefreshKeys();
+        var contexts = new List<RefreshExecutionContext>();
+        static IReadOnlyList<string> ParseKeys(string json) => LikeScript.ParseStringArray(json)
+            .Where(key => !string.IsNullOrWhiteSpace(key))
+            .Distinct(StringComparer.Ordinal)
+            .Take(200)
+            .ToArray();
+
+        try
+        {
+            contexts.Add(new RefreshExecutionContext(
+                IsMain: true,
+                Frame: null,
+                Keys: ParseKeys(await Browser.ExecuteScriptAsync(script))));
+        }
+        catch
+        {
+            return [];
+        }
+
+        foreach (var frame in frames.ToArray())
+        {
+            if (!IsSessionActive(run)) return [];
+            try
+            {
+                if (frame.IsDestroyed() == 0)
+                {
+                    contexts.Add(new RefreshExecutionContext(
+                        IsMain: false,
+                        Frame: frame,
+                        Keys: ParseKeys(await frame.ExecuteScriptAsync(script))));
+                }
+            }
+            catch
+            {
+                return [];
+            }
+        }
+        return contexts;
+    }
+
+    private async Task<LikeScript.RefreshDiffResult?> ApplyAndArmRefreshContextsAsync(
+        AutomationRun run, string expectedTrackerId)
+    {
+        var currentContexts = await CaptureRefreshContextsAsync(run);
+        if (!IsSessionActive(run) || trackerId != expectedTrackerId || currentContexts.Count == 0) return null;
+        var currentCheckpoints = currentContexts
+            .Select(context => new RefreshContextCheckpoint(context.IsMain, context.Keys))
+            .ToArray();
+        var matches = RefreshContextMatcher.Match(pendingRefreshContexts, currentCheckpoints);
+        var anchorFound = false;
+        var newCount = 0;
+
+        for (var index = 0; index < currentContexts.Count; index += 1)
+        {
+            if (!IsSessionActive(run) || trackerId != expectedTrackerId) return null;
+            try
+            {
+                string json;
+                if (matches.TryGetValue(index, out var previousIndex))
+                {
+                    var script = LikeScript.BuildApplyAndArmRefreshKeys(
+                        pendingRefreshContexts[previousIndex].Keys, expectedTrackerId, run.Token);
+                    json = currentContexts[index].IsMain
+                        ? await Browser.ExecuteScriptAsync(script)
+                        : await currentContexts[index].Frame!.ExecuteScriptAsync(script);
+                    var result = LikeScript.ParseRefreshDiffResult(json);
+                    if (result is not { Valid: true, Armed: true }) return null;
+                    anchorFound |= result.AnchorFound;
+                    newCount += result.NewCount;
+                }
+                else
+                {
+                    var script = LikeScript.BuildArmTracker(expectedTrackerId, run.Token);
+                    json = currentContexts[index].IsMain
+                        ? await Browser.ExecuteScriptAsync(script)
+                        : await currentContexts[index].Frame!.ExecuteScriptAsync(script);
+                    if (!LikeScript.ParseBoolean(json)) return null;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        return new LikeScript.RefreshDiffResult(true, anchorFound, newCount, true);
     }
 
     private async Task ReturnToTopAsync(AutomationRun? requiredRun = null)
@@ -719,9 +931,27 @@ public partial class MainWindow : Window
         processedKeys.Add(key);
     }
 
-    private void RefreshButton_Click(object sender, RoutedEventArgs e)
+    private async void RefreshButton_Click(object sender, RoutedEventArgs e)
     {
         if (Browser.CoreWebView2 is null) return;
+        if (running)
+        {
+            if (scanning || refreshInProgress)
+            {
+                UpdateStatus("运行中", "当前扫描或刷新尚未完成，请稍候", true);
+                return;
+            }
+            scanning = true;
+            try
+            {
+                await RefreshFeedAsync(automationSession.Current, force: true);
+            }
+            finally
+            {
+                scanning = false;
+            }
+            return;
+        }
         Browser.Visibility = Visibility.Visible;
         BrowserErrorOverlay.Visibility = Visibility.Collapsed;
         StartNavigationWatchdog();
@@ -754,6 +984,8 @@ public partial class MainWindow : Window
         ScanSecondsBox.Text = settings.ScanSeconds.ToString();
         MinActionSecondsBox.Text = settings.MinActionSeconds.ToString();
         DailyLimitBox.Text = settings.DailyLimit.ToString();
+        AutoRefreshEnabledBox.IsChecked = settings.AutoRefreshEnabled;
+        AutoRefreshMinutesBox.Text = settings.AutoRefreshMinutes.ToString();
         BackfillOnStartBox.IsChecked = settings.BackfillOnStart;
         BackfillLikeLimitBox.Text = settings.BackfillLikeLimit.ToString();
         IncludeKeywordsBox.Text = settings.IncludeKeywords;
@@ -766,6 +998,8 @@ public partial class MainWindow : Window
         settings.ScanSeconds = ParseNumber(ScanSecondsBox.Text, settings.ScanSeconds);
         settings.MinActionSeconds = ParseNumber(MinActionSecondsBox.Text, settings.MinActionSeconds);
         settings.DailyLimit = ParseNumber(DailyLimitBox.Text, settings.DailyLimit);
+        settings.AutoRefreshEnabled = AutoRefreshEnabledBox.IsChecked == true;
+        settings.AutoRefreshMinutes = ParseNumber(AutoRefreshMinutesBox.Text, settings.AutoRefreshMinutes);
         settings.BackfillOnStart = BackfillOnStartBox.IsChecked == true;
         settings.BackfillLikeLimit = ParseNumber(BackfillLikeLimitBox.Text, settings.BackfillLikeLimit);
         settings.IncludeKeywords = IncludeKeywordsBox.Text;
@@ -793,6 +1027,13 @@ public partial class MainWindow : Window
     private void ShowNavigationTimeout()
     {
         navigationWatchdog.Stop();
+        navigationGeneration.Reset();
+        if (refreshInProgress)
+        {
+            refreshInProgress = false;
+            pendingRefreshContexts = [];
+            ScheduleNextRefresh();
+        }
         Browser.Visibility = Visibility.Hidden;
         BrowserErrorOverlay.Visibility = Visibility.Visible;
         BrowserErrorText.Text =
