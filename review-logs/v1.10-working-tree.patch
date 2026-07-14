@@ -1,0 +1,1102 @@
+﻿diff --git a/AppSettings.cs b/AppSettings.cs
+index 1ace1fa..2250713 100644
+--- a/AppSettings.cs
++++ b/AppSettings.cs
+@@ -5,12 +5,14 @@ namespace QzoneLikeAssistant;
+ 
+ internal sealed class AppSettings
+ {
+-    private const int CurrentSettingsVersion = 5;
++    private const int CurrentSettingsVersion = 6;
+ 
+     public int SettingsVersion { get; set; }
+     public int ScanSeconds { get; set; } = 1;
+     public int MinActionSeconds { get; set; } = 3;
+     public int DailyLimit { get; set; } = 300;
++    public bool AutoRefreshEnabled { get; set; } = true;
++    public int AutoRefreshMinutes { get; set; } = 5;
+     public bool BackfillOnStart { get; set; } = true;
+     public int BackfillLikeLimit { get; set; } = 10;
+     public string IncludeKeywords { get; set; } = "";
+@@ -22,17 +24,19 @@ internal sealed class AppSettings
+ 
+     public void Normalize()
+     {
+-        if (SettingsVersion < CurrentSettingsVersion)
++        var sourceVersion = SettingsVersion;
++        if (sourceVersion < 5)
+         {
+             if (ScanSeconds == 2) ScanSeconds = 1;
+             if (MinActionSeconds == 8) MinActionSeconds = 3;
+             if (DailyLimit == 30) DailyLimit = 300;
+-            SettingsVersion = CurrentSettingsVersion;
+         }
++        if (sourceVersion < CurrentSettingsVersion) SettingsVersion = CurrentSettingsVersion;
+ 
+         ScanSeconds = Math.Clamp(ScanSeconds, 1, 60);
+         MinActionSeconds = Math.Clamp(MinActionSeconds, 1, 600);
+         DailyLimit = Math.Clamp(DailyLimit, 1, 5000);
++        AutoRefreshMinutes = Math.Clamp(AutoRefreshMinutes, 1, 60);
+         BackfillLikeLimit = Math.Clamp(BackfillLikeLimit, 1, 100);
+         TodayAttemptCount = Math.Max(TodayAttemptCount, TodayCount);
+         if (LastActionAtUtc != DateTime.MinValue)
+diff --git a/LikeScript.cs b/LikeScript.cs
+index 5a25db0..12c1af8 100644
+--- a/LikeScript.cs
++++ b/LikeScript.cs
+@@ -20,6 +20,8 @@ internal static class LikeScript
+ 
+     internal sealed record TrackerSnapshot(bool Valid, int ItemCount, bool Armed);
+ 
++    internal sealed record RefreshDiffResult(bool Valid, bool AnchorFound, int NewCount, bool Armed);
++
+     public static string BuildStartAttempt(
+         AppSettings settings,
+         IEnumerable<string> processedKeys,
+@@ -331,6 +333,104 @@ internal static class LikeScript
+         """;
+     }
+ 
++    public static string BuildCaptureRefreshKeys(int maxKeys = 60)
++    {
++        maxKeys = Math.Clamp(maxKeys, 1, 200);
++        return $$"""
++        (() => {
++          const buttonSelector = [
++            'a.qz_like_btn_v3', '.qz_like_btn_v3', '[data-optype="like"]',
++            '[data-op="like"]', '[data-action="like"]', 'a[title="赞"]',
++            'button[aria-label="赞"]', 'button[title="赞"]'
++          ].join(',');
++          const itemSelector = [
++            '[data-tid]', '[data-feedskey]', '[data-unikey]', '.f-single',
++            '.feed_item', '.feed-item', '.qz-feed', 'article'
++          ].join(',');
++          const keyFor = item => item.getAttribute('data-tid') ||
++            item.getAttribute('data-feedskey') || item.getAttribute('data-unikey') ||
++            item.id || null;
++          const keys = [];
++          const seen = new Set();
++          for (const button of document.querySelectorAll(buttonSelector)) {
++            const item = button.closest(itemSelector);
++            const key = item && keyFor(item);
++            if (!key || seen.has(key)) continue;
++            seen.add(key);
++            keys.push(key);
++            if (keys.length >= {{maxKeys}}) break;
++          }
++          return keys;
++        })()
++        """;
++    }
++
++    public static string BuildApplyAndArmRefreshKeys(
++        IEnumerable<string> previousTopKeys,
++        string trackerId,
++        string automationToken)
++    {
++        var config = JsonSerializer.Serialize(new
++        {
++            previousTopKeys = previousTopKeys.Take(200).ToArray(),
++            trackerId,
++            automationToken
++        });
++        return $$"""
++        (() => {
++          const config = {{config}};
++          const tracker = globalThis.__qzaFeedTracker;
++          if (globalThis.__qzaAutomationSession !== config.automationToken ||
++              tracker?.trackerId !== config.trackerId ||
++              tracker?.automationToken !== config.automationToken) {
++             return { valid: false, anchorFound: false, newCount: 0, armed: false };
++          }
++          const buttonSelector = [
++            'a.qz_like_btn_v3', '.qz_like_btn_v3', '[data-optype="like"]',
++            '[data-op="like"]', '[data-action="like"]', 'a[title="赞"]',
++            'button[aria-label="赞"]', 'button[title="赞"]'
++          ].join(',');
++          const itemSelector = [
++            '[data-tid]', '[data-feedskey]', '[data-unikey]', '.f-single',
++            '.feed_item', '.feed-item', '.qz-feed', 'article'
++          ].join(',');
++          const keyFor = item => item.getAttribute('data-tid') ||
++            item.getAttribute('data-feedskey') || item.getAttribute('data-unikey') ||
++            item.id || null;
++          const oldKeys = new Set(config.previousTopKeys);
++          const currentKeys = [];
++          const seen = new Set();
++          for (const button of document.querySelectorAll(buttonSelector)) {
++            const item = button.closest(itemSelector);
++            const key = item && keyFor(item);
++            if (!key || seen.has(key)) continue;
++            seen.add(key);
++            currentKeys.push(key);
++            if (currentKeys.length >= 200) break;
++          }
++          const anchorIndex = currentKeys.findIndex(key => oldKeys.has(key));
++          if (anchorIndex < 0) {
++            tracker.bootstrapComplete = true;
++            tracker.reconcileDeferred?.();
++            return { valid: true, anchorFound: false, newCount: 0, armed: true };
++          }
++          let newCount = 0;
++          for (const key of currentKeys.slice(0, Math.min(anchorIndex, 20))) {
++            if (tracker.newKeys.has(key)) continue;
++            tracker.newKeys.add(key);
++            tracker.newOrder.push(key);
++            newCount += 1;
++          }
++          while (tracker.newOrder.length > 500) {
++            tracker.newKeys.delete(tracker.newOrder.shift());
++          }
++          tracker.bootstrapComplete = true;
++          tracker.reconcileDeferred?.();
++          return { valid: true, anchorFound: true, newCount, armed: true };
++        })()
++        """;
++    }
++
+     public static string BuildArmTracker(string trackerId, string automationToken)
+     {
+         var trackerJson = JsonSerializer.Serialize(trackerId);
+@@ -453,6 +553,33 @@ internal static class LikeScript
+     public static int ParseInteger(string json) =>
+         int.TryParse(json, out var value) ? value : 0;
+ 
++    public static IReadOnlyList<string> ParseStringArray(string json)
++    {
++        try
++        {
++            return JsonSerializer.Deserialize<string[]>(json) ?? [];
++        }
++        catch
++        {
++            return [];
++        }
++    }
++
++    public static RefreshDiffResult? ParseRefreshDiffResult(string json)
++    {
++        try
++        {
++            return JsonSerializer.Deserialize<RefreshDiffResult>(json, new JsonSerializerOptions
++            {
++                PropertyNameCaseInsensitive = true
++            });
++        }
++        catch
++        {
++            return null;
++        }
++    }
++
+     public static Result? ParseResult(string json)
+     {
+         try
+diff --git a/MainWindow.xaml b/MainWindow.xaml
+index 74a2acb..097cf69 100644
+--- a/MainWindow.xaml
++++ b/MainWindow.xaml
+@@ -93,6 +93,35 @@
+                                 </Grid>
+                                 <Border Height="1" Background="#F2E9EB" />
+ 
++                                <Grid Margin="0,11">
++                                    <Grid.ColumnDefinitions>
++                                        <ColumnDefinition Width="*" />
++                                        <ColumnDefinition Width="Auto" />
++                                    </Grid.ColumnDefinitions>
++                                    <StackPanel VerticalAlignment="Center">
++                                        <TextBlock Text="自动刷新" Foreground="#493B42" FontSize="13" />
++                                        <TextBlock Text="按顶部动态锚点安全识别刷新结果" Foreground="#A49198" FontSize="10" Margin="0,3,0,0" />
++                                    </StackPanel>
++                                    <CheckBox x:Name="AutoRefreshEnabledBox" Grid.Column="1" Content="开启"
++                                              HorizontalAlignment="Right" VerticalAlignment="Center" />
++                                </Grid>
++                                <Border Height="1" Background="#F2E9EB" />
++
++                                <Grid Margin="0,7">
++                                    <Grid.ColumnDefinitions>
++                                        <ColumnDefinition Width="*" />
++                                        <ColumnDefinition Width="82" />
++                                        <ColumnDefinition Width="28" />
++                                    </Grid.ColumnDefinitions>
++                                    <StackPanel VerticalAlignment="Center">
++                                        <TextBlock Text="刷新间隔" Foreground="#493B42" FontSize="13" />
++                                        <TextBlock Text="重新向 QQ 空间请求顶部动态" Foreground="#A49198" FontSize="10" Margin="0,3,0,0" />
++                                    </StackPanel>
++                                    <TextBox x:Name="AutoRefreshMinutesBox" Grid.Column="1" TextAlignment="Right" />
++                                    <TextBlock Grid.Column="2" Text="分" Foreground="#9B8990" VerticalAlignment="Center" HorizontalAlignment="Right" />
++                                </Grid>
++                                <Border Height="1" Background="#F2E9EB" />
++
+                                 <Grid Margin="0,7">
+                                     <Grid.ColumnDefinitions>
+                                         <ColumnDefinition Width="*" />
+@@ -198,7 +227,7 @@
+                     <Grid Margin="28,11,28,18">
+                         <TextBlock Text="QZONE ASSISTANT" Foreground="#B3A2A8" FontSize="9" />
+                         <Border HorizontalAlignment="Right" CornerRadius="8" Background="#F3EAEC" Padding="7,3">
+-                            <TextBlock Text="v1.9" Foreground="#8E7B82" FontSize="9" />
++                            <TextBlock Text="v1.10" Foreground="#8E7B82" FontSize="9" />
+                         </Border>
+                     </Grid>
+                 </Border>
+diff --git a/MainWindow.xaml.cs b/MainWindow.xaml.cs
+index adcd59a..5b22e98 100644
+--- a/MainWindow.xaml.cs
++++ b/MainWindow.xaml.cs
+@@ -22,6 +22,7 @@ public partial class MainWindow : Window
+     private readonly BoundedKeySet processedKeys = new(1000);
+     private readonly AutomationSession automationSession = new();
+     private readonly AttemptQuotaLedger attemptQuotaLedger = new();
++    private readonly NavigationGeneration navigationGeneration = new();
+     private AppSettings settings;
+     private bool running;
+     private bool scanning;
+@@ -41,6 +42,14 @@ public partial class MainWindow : Window
+     private string backfillSessionId = "";
+     private string trackerId = "";
+     private string networkDiagnostic = "";
++    private DateTime nextAutoRefreshAtUtc = DateTime.MaxValue;
++    private bool refreshInProgress;
++    private IReadOnlyList<RefreshContextCheckpoint> pendingRefreshContexts = [];
++
++    private sealed record RefreshExecutionContext(
++        bool IsMain,
++        CoreWebView2Frame? Frame,
++        IReadOnlyList<string> Keys);
+ 
+     private string SettingsPath => Path.Combine(appDataDirectory, "settings.json");
+     private string BrowserDataPath => Path.Combine(appDataDirectory, "WebView2");
+@@ -80,6 +89,8 @@ public partial class MainWindow : Window
+             {
+                 if (IsAllowedAppUrl(args.Uri))
+                 {
++                    navigationGeneration.Start(args.NavigationId);
++                    StartNavigationWatchdog();
+                     if (Uri.TryCreate(args.Uri, UriKind.Absolute, out var target))
+                     {
+                         UpdateStatus(running ? "运行中" : "正在连接", $"正在打开 {target.Host}", running);
+@@ -92,6 +103,7 @@ public partial class MainWindow : Window
+             };
+             core.NavigationCompleted += (_, args) =>
+             {
++                if (!navigationGeneration.TryComplete(args.NavigationId)) return;
+                 if (args.IsSuccess)
+                 {
+                     navigationWatchdog.Stop();
+@@ -101,7 +113,10 @@ public partial class MainWindow : Window
+                     {
+                         BeginBaselineRearm();
+                     }
+-                    UpdateStatus(running ? "运行中" : "准备就绪", "页面已加载，请登录并进入好友动态", running);
++                    UpdateStatus(running ? "运行中" : "准备就绪",
++                        refreshInProgress
++                            ? "页面已刷新，正在安全对比顶部动态"
++                            : "页面已加载，请登录并进入好友动态", running);
+                 }
+                 else
+                 {
+@@ -109,6 +124,13 @@ public partial class MainWindow : Window
+                     // QQ login uses several redirects, so this is not a terminal failure.
+                     if (args.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled)
+                     {
++                        navigationWatchdog.Stop();
++                        if (refreshInProgress)
++                        {
++                            refreshInProgress = false;
++                            pendingRefreshContexts = [];
++                            ScheduleNextRefresh();
++                        }
+                         Browser.Visibility = Visibility.Visible;
+                         BrowserErrorOverlay.Visibility = Visibility.Collapsed;
+                         UpdateStatus(running ? "运行中" : "正在跳转", "QQ 登录正在继续跳转", running);
+@@ -116,6 +138,9 @@ public partial class MainWindow : Window
+                     }
+ 
+                     navigationWatchdog.Stop();
++                    refreshInProgress = false;
++                    pendingRefreshContexts = [];
++                    ScheduleNextRefresh();
+                     Browser.Visibility = Visibility.Hidden;
+                     BrowserErrorOverlay.Visibility = Visibility.Visible;
+                     BrowserErrorText.Text = string.IsNullOrWhiteSpace(networkDiagnostic)
+@@ -125,7 +150,6 @@ public partial class MainWindow : Window
+                 }
+             };
+             core.FrameCreated += (_, args) => TrackFrame(args.Frame);
+-            StartNavigationWatchdog();
+             core.Navigate(QzoneHome);
+         }
+         catch (Exception ex)
+@@ -170,6 +194,9 @@ public partial class MainWindow : Window
+         backfillPassPending = false;
+         backfillPassAtTop = false;
+         BeginBaselineRearm();
++        refreshInProgress = false;
++        pendingRefreshContexts = [];
++        ScheduleNextRefresh();
+         scanTimer.Interval = TimeSpan.FromSeconds(settings.ScanSeconds);
+         scanTimer.Start();
+         ToggleButton.Content = "停止自动点赞";
+@@ -183,6 +210,9 @@ public partial class MainWindow : Window
+         var stoppedToken = automationSession.Stop();
+         running = false;
+         scanTimer.Stop();
++        refreshInProgress = false;
++        pendingRefreshContexts = [];
++        nextAutoRefreshAtUtc = DateTime.MaxValue;
+         if (!string.IsNullOrWhiteSpace(stoppedToken)) _ = InvalidateAutomationInPagesAsync(stoppedToken);
+         if (backfillPassPending) _ = ReturnToTopAsync();
+         backfillPassPending = false;
+@@ -199,20 +229,24 @@ public partial class MainWindow : Window
+     private async Task ScanOnceAsync()
+     {
+         var run = automationSession.Current;
+-        if (!IsSessionActive(run) || scanning || Browser.CoreWebView2 is null) return;
++        if (!IsSessionActive(run) || scanning || navigationGeneration.InProgress || Browser.CoreWebView2 is null) return;
+         settings.ResetStatsIfNeeded();
+         if (settings.TodayAttemptCount >= settings.DailyLimit)
+         {
+             StopAutomation("已达到今日点赞上限");
+             return;
+         }
+-        if (!settings.IsActionCooldownElapsed(DateTime.UtcNow)) return;
+-
+         var token = run.Token;
+         scanning = true;
+         try
+         {
+             if (!IsSessionActive(run)) return;
++            if (ShouldAutoRefresh())
++            {
++                await RefreshFeedAsync(run, force: false);
++                return;
++            }
++            if (!settings.IsActionCooldownElapsed(DateTime.UtcNow)) return;
+             var isBackfillPass = backfillPassPending;
+             if (!isBackfillPass)
+             {
+@@ -482,17 +516,48 @@ public partial class MainWindow : Window
+             return;
+         }
+ 
+-        var armed = await ArmFeedTrackersAsync(run, expectedTrackerId);
+-        if (!IsSessionActive(run) || trackerId != expectedTrackerId) return;
+-        if (!armed)
++        LikeScript.RefreshDiffResult? refreshDiff = null;
++        if (refreshInProgress)
+         {
+-            BeginBaselineRearm();
+-            UpdateStatus("运行中", "页面在基线武装时发生变化，正在重新建立安全基线", true);
+-            return;
++            refreshDiff = await ApplyAndArmRefreshContextsAsync(run, expectedTrackerId);
++            if (!IsSessionActive(run) || trackerId != expectedTrackerId) return;
++            if (refreshDiff is null)
++            {
++                BeginBaselineRearm();
++                UpdateStatus("运行中", "刷新结果对比中断，正在重新建立安全基线", true);
++                return;
++            }
++        }
++
++        if (!refreshInProgress)
++        {
++            var armed = await ArmFeedTrackersAsync(run, expectedTrackerId);
++            if (!IsSessionActive(run) || trackerId != expectedTrackerId) return;
++            if (!armed)
++            {
++                BeginBaselineRearm();
++                UpdateStatus("运行中", "页面在基线武装时发生变化，正在重新建立安全基线", true);
++                return;
++            }
+         }
+ 
+         baselineReady = true;
+-        UpdateStatus("运行中", "安全基线已武装，之后顶部新增的条目才视为新动态", true);
++        if (refreshInProgress)
++        {
++            refreshInProgress = false;
++            pendingRefreshContexts = [];
++            ScheduleNextRefresh();
++            UpdateStatus("运行中", refreshDiff switch
++            {
++                { AnchorFound: true, NewCount: > 0 } => $"自动刷新完成，识别到 {refreshDiff.NewCount} 条新增动态",
++                { AnchorFound: true } => "自动刷新完成，暂未发现新增动态",
++                _ => "自动刷新完成，但未找到旧锚点；本轮内容已按历史动态保护"
++            }, true);
++        }
++        else
++        {
++            UpdateStatus("运行中", "安全基线已武装，之后顶部新增的条目才视为新动态", true);
++        }
+     }
+ 
+     private async Task<bool> InitializeFeedTrackersAsync(AutomationRun run, string expectedTrackerId)
+@@ -597,6 +662,153 @@ public partial class MainWindow : Window
+         return allArmed;
+     }
+ 
++    private bool ShouldAutoRefresh() => settings.AutoRefreshEnabled && baselineReady &&
++        !refreshInProgress && !backfillPassPending && !CanContinueBackfill() &&
++        DateTime.UtcNow >= nextAutoRefreshAtUtc;
++
++    private void ScheduleNextRefresh()
++    {
++        nextAutoRefreshAtUtc = running && settings.AutoRefreshEnabled
++            ? DateTime.UtcNow.AddMinutes(settings.AutoRefreshMinutes)
++            : DateTime.MaxValue;
++    }
++
++    private async Task RefreshFeedAsync(AutomationRun run, bool force)
++    {
++        if (!IsSessionActive(run) || Browser.CoreWebView2 is null || refreshInProgress) return;
++        await ReturnToTopAsync(run);
++        if (!IsSessionActive(run)) return;
++        await Task.Delay(150);
++        if (!IsSessionActive(run)) return;
++
++        var checkpointContexts = await CaptureRefreshContextsAsync(run);
++        if (!IsSessionActive(run)) return;
++        var checkpointKeyCount = checkpointContexts.Sum(context => context.Keys.Count);
++        if (checkpointKeyCount == 0 && !force)
++        {
++            nextAutoRefreshAtUtc = DateTime.UtcNow.AddMinutes(1);
++            UpdateStatus("运行中", "自动刷新等待好友动态顶部锚点", true);
++            return;
++        }
++
++        pendingRefreshContexts = checkpointContexts
++            .Select(context => new RefreshContextCheckpoint(context.IsMain, context.Keys))
++            .ToArray();
++        refreshInProgress = true;
++        backfillScrollsRemaining = 0;
++        backfillPassPending = false;
++        backfillPassAtTop = false;
++        UpdateStatus("正在刷新", checkpointKeyCount > 0
++            ? $"已保存 {checkpointKeyCount} 个顶部锚点，正在重新加载 QQ 空间"
++            : "未找到动态锚点，正在执行安全刷新", true);
++        StartNavigationWatchdog();
++        try
++        {
++            navigationGeneration.MarkPending();
++            Browser.CoreWebView2.Reload();
++        }
++        catch
++        {
++            navigationWatchdog.Stop();
++            navigationGeneration.Reset();
++            refreshInProgress = false;
++            pendingRefreshContexts = [];
++            ScheduleNextRefresh();
++            UpdateStatus("运行中", "刷新请求失败，稍后重试", true);
++        }
++    }
++
++    private async Task<IReadOnlyList<RefreshExecutionContext>> CaptureRefreshContextsAsync(AutomationRun run)
++    {
++        var script = LikeScript.BuildCaptureRefreshKeys();
++        var contexts = new List<RefreshExecutionContext>();
++        static IReadOnlyList<string> ParseKeys(string json) => LikeScript.ParseStringArray(json)
++            .Where(key => !string.IsNullOrWhiteSpace(key))
++            .Distinct(StringComparer.Ordinal)
++            .Take(200)
++            .ToArray();
++
++        try
++        {
++            contexts.Add(new RefreshExecutionContext(
++                IsMain: true,
++                Frame: null,
++                Keys: ParseKeys(await Browser.ExecuteScriptAsync(script))));
++        }
++        catch
++        {
++            return [];
++        }
++
++        foreach (var frame in frames.ToArray())
++        {
++            if (!IsSessionActive(run)) return [];
++            try
++            {
++                if (frame.IsDestroyed() == 0)
++                {
++                    contexts.Add(new RefreshExecutionContext(
++                        IsMain: false,
++                        Frame: frame,
++                        Keys: ParseKeys(await frame.ExecuteScriptAsync(script))));
++                }
++            }
++            catch
++            {
++                return [];
++            }
++        }
++        return contexts;
++    }
++
++    private async Task<LikeScript.RefreshDiffResult?> ApplyAndArmRefreshContextsAsync(
++        AutomationRun run, string expectedTrackerId)
++    {
++        var currentContexts = await CaptureRefreshContextsAsync(run);
++        if (!IsSessionActive(run) || trackerId != expectedTrackerId || currentContexts.Count == 0) return null;
++        var currentCheckpoints = currentContexts
++            .Select(context => new RefreshContextCheckpoint(context.IsMain, context.Keys))
++            .ToArray();
++        var matches = RefreshContextMatcher.Match(pendingRefreshContexts, currentCheckpoints);
++        var anchorFound = false;
++        var newCount = 0;
++
++        for (var index = 0; index < currentContexts.Count; index += 1)
++        {
++            if (!IsSessionActive(run) || trackerId != expectedTrackerId) return null;
++            try
++            {
++                string json;
++                if (matches.TryGetValue(index, out var previousIndex))
++                {
++                    var script = LikeScript.BuildApplyAndArmRefreshKeys(
++                        pendingRefreshContexts[previousIndex].Keys, expectedTrackerId, run.Token);
++                    json = currentContexts[index].IsMain
++                        ? await Browser.ExecuteScriptAsync(script)
++                        : await currentContexts[index].Frame!.ExecuteScriptAsync(script);
++                    var result = LikeScript.ParseRefreshDiffResult(json);
++                    if (result is not { Valid: true, Armed: true }) return null;
++                    anchorFound |= result.AnchorFound;
++                    newCount += result.NewCount;
++                }
++                else
++                {
++                    var script = LikeScript.BuildArmTracker(expectedTrackerId, run.Token);
++                    json = currentContexts[index].IsMain
++                        ? await Browser.ExecuteScriptAsync(script)
++                        : await currentContexts[index].Frame!.ExecuteScriptAsync(script);
++                    if (!LikeScript.ParseBoolean(json)) return null;
++                }
++            }
++            catch
++            {
++                return null;
++            }
++        }
++
++        return new LikeScript.RefreshDiffResult(true, anchorFound, newCount, true);
++    }
++
+     private async Task ReturnToTopAsync(AutomationRun? requiredRun = null)
+     {
+         bool Allowed() => requiredRun is null || IsSessionActive(requiredRun.Value);
+@@ -719,9 +931,27 @@ public partial class MainWindow : Window
+         processedKeys.Add(key);
+     }
+ 
+-    private void RefreshButton_Click(object sender, RoutedEventArgs e)
++    private async void RefreshButton_Click(object sender, RoutedEventArgs e)
+     {
+         if (Browser.CoreWebView2 is null) return;
++        if (running)
++        {
++            if (scanning || refreshInProgress)
++            {
++                UpdateStatus("运行中", "当前扫描或刷新尚未完成，请稍候", true);
++                return;
++            }
++            scanning = true;
++            try
++            {
++                await RefreshFeedAsync(automationSession.Current, force: true);
++            }
++            finally
++            {
++                scanning = false;
++            }
++            return;
++        }
+         Browser.Visibility = Visibility.Visible;
+         BrowserErrorOverlay.Visibility = Visibility.Collapsed;
+         StartNavigationWatchdog();
+@@ -754,6 +984,8 @@ public partial class MainWindow : Window
+         ScanSecondsBox.Text = settings.ScanSeconds.ToString();
+         MinActionSecondsBox.Text = settings.MinActionSeconds.ToString();
+         DailyLimitBox.Text = settings.DailyLimit.ToString();
++        AutoRefreshEnabledBox.IsChecked = settings.AutoRefreshEnabled;
++        AutoRefreshMinutesBox.Text = settings.AutoRefreshMinutes.ToString();
+         BackfillOnStartBox.IsChecked = settings.BackfillOnStart;
+         BackfillLikeLimitBox.Text = settings.BackfillLikeLimit.ToString();
+         IncludeKeywordsBox.Text = settings.IncludeKeywords;
+@@ -766,6 +998,8 @@ public partial class MainWindow : Window
+         settings.ScanSeconds = ParseNumber(ScanSecondsBox.Text, settings.ScanSeconds);
+         settings.MinActionSeconds = ParseNumber(MinActionSecondsBox.Text, settings.MinActionSeconds);
+         settings.DailyLimit = ParseNumber(DailyLimitBox.Text, settings.DailyLimit);
++        settings.AutoRefreshEnabled = AutoRefreshEnabledBox.IsChecked == true;
++        settings.AutoRefreshMinutes = ParseNumber(AutoRefreshMinutesBox.Text, settings.AutoRefreshMinutes);
+         settings.BackfillOnStart = BackfillOnStartBox.IsChecked == true;
+         settings.BackfillLikeLimit = ParseNumber(BackfillLikeLimitBox.Text, settings.BackfillLikeLimit);
+         settings.IncludeKeywords = IncludeKeywordsBox.Text;
+@@ -793,6 +1027,13 @@ public partial class MainWindow : Window
+     private void ShowNavigationTimeout()
+     {
+         navigationWatchdog.Stop();
++        navigationGeneration.Reset();
++        if (refreshInProgress)
++        {
++            refreshInProgress = false;
++            pendingRefreshContexts = [];
++            ScheduleNextRefresh();
++        }
+         Browser.Visibility = Visibility.Hidden;
+         BrowserErrorOverlay.Visibility = Visibility.Visible;
+         BrowserErrorText.Text =
+diff --git a/README.md b/README.md
+index 21d7362..080c94f 100644
+--- a/README.md
++++ b/README.md
+@@ -21,6 +21,7 @@
+ 
+ - 在 App 内打开腾讯官方 QQ 空间页面，支持扫码或页面提供的其他登录方式。
+ - 监听好友动态，并按照扫描间隔与点赞冷却执行操作。
++- 可按设定周期自动刷新页面；刷新前后仅使用动态稳定 ID，并按主页面/frame 上下文分别匹配顶部锚点。
+ - 可设置每日尝试上限、启动回扫上限和关键词过滤。
+ - 启动时先登记页面已有内容，尽量避免把首屏历史动态误认为刚发布的新动态。
+ - 可选“启动回扫”，处理开启监听前已经加载的少量动态。
+@@ -54,6 +55,7 @@
+ | 设置 | 建议值 | 说明 |
+ | --- | ---: | --- |
+ | 扫描间隔 | 3～5 秒 | 检查页面更新的频率，不等于点赞频率 |
++| 自动刷新 | 开启，5 分钟 | 刷新前后安全对比顶部动态锚点 |
+ | 点赞冷却 | 8～15 秒 | 建议从 10 秒开始 |
+ | 每日上限 | 30～100 次 | 建议先设为 60 次 |
+ | 启动回扫 | 按需开启 | 不需要补赞旧动态时建议关闭 |
+@@ -117,6 +119,13 @@ dotnet run --project tests/QzoneLikeAssistant.WebView2IntegrationTests -c Releas
+ 
+ ## 版本说明
+ 
++### V1.10
++
++- 增加可关闭的安全自动刷新，默认每 5 分钟执行一次。
++- 刷新前按页面上下文分别保存稳定 ID 锚点，刷新后只把唯一匹配的旧锚点之前条目判定为新增。
++- 锚点少于两个、匹配有歧义或找不到旧锚点时，当前上下文全部按历史内容保护，避免误赞。
++- 页面导航期间暂停扫描，加载完成并重建基线后恢复。
++
+ ### V1.9
+ 
+ - 更换为淡粉与白色分区界面。
+diff --git a/tests/QzoneLikeAssistant.SmokeTests/Program.cs b/tests/QzoneLikeAssistant.SmokeTests/Program.cs
+index be88bf2..01176ba 100644
+--- a/tests/QzoneLikeAssistant.SmokeTests/Program.cs
++++ b/tests/QzoneLikeAssistant.SmokeTests/Program.cs
+@@ -1,4 +1,5 @@
+ using System.Diagnostics;
++using System.Text.Json;
+ using QzoneLikeAssistant;
+ 
+ var settings = new AppSettings();
+@@ -6,7 +7,22 @@ settings.Normalize();
+ Require(settings.ScanSeconds == 1, "默认扫描间隔应为 1 秒");
+ Require(settings.MinActionSeconds == 3, "默认点赞冷却应为 3 秒");
+ Require(settings.DailyLimit == 300, "默认每日上限应为 300 次");
++Require(settings.AutoRefreshEnabled, "默认应开启安全自动刷新");
++Require(settings.AutoRefreshMinutes == 5, "默认自动刷新间隔应为 5 分钟");
+ Require(settings.TodayAttemptCount == 0, "每日尝试数默认应为 0");
++var version5Settings = new AppSettings
++{
++    SettingsVersion = 5,
++    ScanSeconds = 2,
++    MinActionSeconds = 8,
++    DailyLimit = 30
++};
++version5Settings.Normalize();
++Require(version5Settings.SettingsVersion == 6, "V5 设置应只提升版本号");
++Require(version5Settings.ScanSeconds == 2 &&
++        version5Settings.MinActionSeconds == 8 &&
++        version5Settings.DailyLimit == 30,
++    "V5 用户自定义扫描、冷却和每日上限不得被旧迁移覆盖");
+ settings.TodayCount = 3;
+ settings.Normalize();
+ Require(settings.TodayAttemptCount == 3, "旧设置迁移后尝试数不得低于确认成功数");
+@@ -62,6 +78,47 @@ Require(!reloadedCooldownSettings.IsActionCooldownElapsed(cooldownAt.AddSeconds(
+     "重新加载设置后仍不得绕过冷却");
+ Directory.Delete(cooldownDirectory, true);
+ 
++var previousContexts = new RefreshContextCheckpoint[]
++{
++    new(true, ["main-a", "main-b"]),
++    new(false, ["frame-a", "frame-b"]),
++    new(false, ["frame-c", "frame-d"])
++};
++var currentContexts = new RefreshContextCheckpoint[]
++{
++    new(true, ["main-a", "main-b"]),
++    new(false, ["frame-c", "frame-d"]),
++    new(false, ["frame-a", "frame-b"])
++};
++var contextMatches = RefreshContextMatcher.Match(previousContexts, currentContexts);
++Require(contextMatches.Count == 3 &&
++        contextMatches[0] == 0 && contextMatches[1] == 2 && contextMatches[2] == 1,
++    "刷新上下文应按独立稳定锚点匹配，不能依赖 frame 顺序");
++Require(RefreshContextMatcher.Match(
++        [new(false, ["only-one"])],
++        [new(false, ["only-one"])]).Count == 0,
++    "只有一个共同锚点时应保守地视为上下文不明确");
++Require(RefreshContextMatcher.Match(
++        [new(false, ["same-a", "same-b"]), new(false, ["same-a", "same-b"])],
++        [new(false, ["same-a", "same-b"])]).Count == 0,
++    "多个 frame 都可匹配时不得选取歧义锚点");
++Require(RefreshContextMatcher.Match(
++        [new(true, ["cross-a", "cross-b"])],
++        [new(false, ["cross-a", "cross-b"])]).Count == 0,
++    "主页面锚点不得跨上下文匹配到 frame");
++
++var navigation = new NavigationGeneration();
++navigation.Start(100);
++navigation.Start(101);
++Require(!navigation.TryComplete(100) && navigation.InProgress && navigation.CurrentId == 101,
++    "旧导航的完成事件不得清除最新导航状态");
++Require(navigation.TryComplete(101) && !navigation.InProgress,
++    "最新导航完成后必须解除扫描暂停");
++navigation.MarkPending();
++navigation.Start(102);
++Require(navigation.TryComplete(102) && !navigation.InProgress,
++    "孤立的最新 OperationCanceled 应能按导航代次解除扫描暂停");
++
+ var scripts = new Dictionary<string, string>
+ {
+     ["start-attempt"] = LikeScript.BuildStartAttempt(settings, bounded, true, "new", "tracker-test", "token-test"),
+@@ -69,6 +126,8 @@ var scripts = new Dictionary<string, string>
+     ["tracker"] = LikeScript.BuildInitializeTracker("tracker-test", "token-test"),
+     ["tracker-snapshot"] = LikeScript.BuildGetTrackerSnapshot("tracker-test", "token-test"),
+     ["tracker-arm"] = LikeScript.BuildArmTracker("tracker-test", "token-test"),
++    ["refresh-capture"] = LikeScript.BuildCaptureRefreshKeys(),
++    ["refresh-apply-arm"] = LikeScript.BuildApplyAndArmRefreshKeys(["old-1"], "tracker-test", "token-test"),
+     ["invalidate"] = LikeScript.BuildInvalidateAutomation("token-test"),
+     ["backfill"] = LikeScript.BuildBackfillScroll("backfill-test", "token-test"),
+     ["return-top"] = LikeScript.BuildReturnToTop("backfill-test")
+@@ -85,8 +144,16 @@ Require(confirmed is { Completed: true, Clicked: true, Attempted: true, Key: "k"
+ var started = LikeScript.ParseStartResult(
+     """{"started":true,"trackerMissing":false,"attemptId":"a","error":null}""");
+ Require(started is { Started: true, AttemptId: "a" }, "同步启动结果必须能被解析");
++var refreshDiff = LikeScript.ParseRefreshDiffResult(
++    """{"valid":true,"anchorFound":true,"newCount":2,"armed":true}""");
++Require(refreshDiff is { Valid: true, AnchorFound: true, NewCount: 2, Armed: true }, "刷新差异结果必须能被解析");
++Require(!LikeScript.BuildCaptureRefreshKeys().Contains("innerText", StringComparison.Ordinal) &&
++        !LikeScript.BuildApplyAndArmRefreshKeys(["old-1"], "tracker-test", "token-test")
++            .Contains("innerText", StringComparison.Ordinal),
++    "刷新锚点脚本不得退化到不稳定的正文文本");
++await CheckRefreshDiffBehaviorAsync();
+ 
+-Console.WriteLine("Smoke tests passed: defaults, persistent restart cooldown, stopped-race quota, session invalidation, FIFO eviction, result parsing, generated JavaScript syntax.");
++Console.WriteLine("Smoke tests passed: defaults, V5 migration preservation, navigation generations, context-safe refresh matching, atomic refresh arm, persistent restart cooldown, stopped-race quota, session invalidation, FIFO eviction, generated JavaScript syntax.");
+ 
+ static void Require(bool condition, string message)
+ {
+@@ -115,3 +182,98 @@ static async Task CheckJavaScriptAsync(string name, string script)
+     if (process.ExitCode != 0)
+         throw new InvalidOperationException($"JavaScript {name} 语法检查失败：{error}");
+ }
++
++static async Task CheckRefreshDiffBehaviorAsync()
++{
++    const string trackerId = "refresh-smoke-tracker";
++    const string token = "refresh-smoke-token";
++    var captureOutput = await RunJavaScriptAsync(BuildDomHarness(
++        ["old-a", "old-b"], trackerId, token, LikeScript.BuildCaptureRefreshKeys()));
++    using var captureJson = JsonDocument.Parse(captureOutput);
++    var captured = captureJson.RootElement.GetProperty("result").EnumerateArray()
++        .Select(element => element.GetString()).ToArray();
++    Require(captured.SequenceEqual(["old-a", "old-b"]), "刷新前必须按页面顺序保存顶部锚点");
++
++    var applyOutput = await RunJavaScriptAsync(BuildDomHarness(
++        ["new-c", "old-a", "old-b"], trackerId, token,
++        LikeScript.BuildApplyAndArmRefreshKeys(["old-a", "old-b"], trackerId, token)));
++    using var applyJson = JsonDocument.Parse(applyOutput);
++    var result = applyJson.RootElement.GetProperty("result");
++    Require(result.GetProperty("valid").GetBoolean() &&
++            result.GetProperty("anchorFound").GetBoolean() &&
++            result.GetProperty("newCount").GetInt32() == 1 &&
++            result.GetProperty("armed").GetBoolean() &&
++            applyJson.RootElement.GetProperty("trackerArmed").GetBoolean(),
++        "刷新后必须只识别旧锚点之前的新增动态");
++    var newKeys = applyJson.RootElement.GetProperty("newKeys").EnumerateArray()
++        .Select(element => element.GetString()).ToArray();
++    Require(newKeys.SequenceEqual(["new-c"]), "旧锚点及其后的历史动态不得进入新动态队列");
++
++    var missingOutput = await RunJavaScriptAsync(BuildDomHarness(
++        ["unrelated-x"], trackerId, token,
++        LikeScript.BuildApplyAndArmRefreshKeys(["old-a", "old-b"], trackerId, token)));
++    using var missingJson = JsonDocument.Parse(missingOutput);
++    var missing = missingJson.RootElement.GetProperty("result");
++    Require(!missing.GetProperty("anchorFound").GetBoolean() &&
++            missing.GetProperty("newCount").GetInt32() == 0 &&
++            missing.GetProperty("armed").GetBoolean() &&
++            missingJson.RootElement.GetProperty("trackerArmed").GetBoolean() &&
++            missingJson.RootElement.GetProperty("newKeys").GetArrayLength() == 0,
++        "找不到旧锚点时必须把当前页面全部按历史内容保护");
++}
++
++static string BuildDomHarness(
++    string[] keys,
++    string trackerId,
++    string token,
++    string expression)
++{
++    var keysJson = JsonSerializer.Serialize(keys);
++    var trackerJson = JsonSerializer.Serialize(trackerId);
++    var tokenJson = JsonSerializer.Serialize(token);
++    return $$"""
++    const keys = {{keysJson}};
++    const items = keys.map(key => ({
++      getAttribute: name => name === 'data-tid' ? key : null,
++      id: '', innerText: key
++    }));
++    const buttons = items.map(item => ({ closest: () => item }));
++    globalThis.document = { querySelectorAll: () => buttons };
++    globalThis.__qzaAutomationSession = {{tokenJson}};
++    globalThis.__qzaFeedTracker = {
++      trackerId: {{trackerJson}}, automationToken: {{tokenJson}},
++      newKeys: new Set(), newOrder: [], bootstrapComplete: false
++    };
++    const result = {{expression}};
++    console.log(JSON.stringify({
++      result,
++      newKeys: [...globalThis.__qzaFeedTracker.newKeys],
++      trackerArmed: globalThis.__qzaFeedTracker.bootstrapComplete === true
++    }));
++    """;
++}
++
++static async Task<string> RunJavaScriptAsync(string script)
++{
++    var startInfo = new ProcessStartInfo("node")
++    {
++        UseShellExecute = false,
++        RedirectStandardInput = true,
++        RedirectStandardOutput = true,
++        RedirectStandardError = true,
++        CreateNoWindow = true
++    };
++    startInfo.ArgumentList.Add("-");
++    using var process = Process.Start(startInfo) ??
++        throw new InvalidOperationException("无法启动 Node.js 执行刷新差异测试");
++    var outputTask = process.StandardOutput.ReadToEndAsync();
++    var errorTask = process.StandardError.ReadToEndAsync();
++    await process.StandardInput.WriteAsync(script);
++    process.StandardInput.Close();
++    await process.WaitForExitAsync();
++    var output = await outputTask;
++    var error = await errorTask;
++    if (process.ExitCode != 0)
++        throw new InvalidOperationException($"刷新差异 JavaScript 执行失败：{error}");
++    return output.Trim();
++}
+diff --git a/tests/QzoneLikeAssistant.SmokeTests/QzoneLikeAssistant.SmokeTests.csproj b/tests/QzoneLikeAssistant.SmokeTests/QzoneLikeAssistant.SmokeTests.csproj
+index 5e2c6ea..a12edf4 100644
+--- a/tests/QzoneLikeAssistant.SmokeTests/QzoneLikeAssistant.SmokeTests.csproj
++++ b/tests/QzoneLikeAssistant.SmokeTests/QzoneLikeAssistant.SmokeTests.csproj
+@@ -12,5 +12,7 @@
+     <Compile Include="..\..\AttemptQuotaLedger.cs" Link="AttemptQuotaLedger.cs" />
+     <Compile Include="..\..\BoundedKeySet.cs" Link="BoundedKeySet.cs" />
+     <Compile Include="..\..\LikeScript.cs" Link="LikeScript.cs" />
++    <Compile Include="..\..\NavigationGeneration.cs" Link="NavigationGeneration.cs" />
++    <Compile Include="..\..\RefreshContextMatcher.cs" Link="RefreshContextMatcher.cs" />
+   </ItemGroup>
+ </Project>
+diff --git a/tests/QzoneLikeAssistant.WebView2IntegrationTests/Program.cs b/tests/QzoneLikeAssistant.WebView2IntegrationTests/Program.cs
+index f7a9d71..b97d0a2 100644
+--- a/tests/QzoneLikeAssistant.WebView2IntegrationTests/Program.cs
++++ b/tests/QzoneLikeAssistant.WebView2IntegrationTests/Program.cs
+@@ -30,7 +30,7 @@ internal static class Program
+             try
+             {
+                 await RunIntegrationTestAsync(browser);
+-                Console.WriteLine("WebView2 integration test passed: synchronous attempt, polling, tracker-missing, backfill reconciliation, explicit host baseline arm.");
++                Console.WriteLine("WebView2 integration test passed: synchronous attempt, polling, tracker-missing, backfill reconciliation, explicit host baseline arm, atomic refresh-anchor diff and arm.");
+                 exitCode = 0;
+             }
+             catch (Exception exception)
+@@ -194,6 +194,80 @@ internal static class Program
+             "globalThis.__qzaFeedTracker.newKeys.has('after-bootstrap-new')")),
+             "宿主显式武装后的顶部插入项应进入新动态队列");
+ 
++        await browser.ExecuteScriptAsync("""
++            document.body.innerHTML = `
++              <article class="feed_item" data-tid="refresh-old-a">
++                <p>刷新前顶部动态 A</p><button title="赞" aria-pressed="false">赞</button>
++              </article>
++              <article class="feed_item" data-tid="refresh-old-b">
++                <p>刷新前顶部动态 B</p><button title="赞" aria-pressed="false">赞</button>
++              </article>`;
++            true;
++            """);
++        const string beforeRefreshTrackerId = "before-refresh";
++        LikeScript.ParseInteger(await browser.ExecuteScriptAsync(
++            LikeScript.BuildInitializeTracker(beforeRefreshTrackerId, token)));
++        var refreshCheckpoint = LikeScript.ParseStringArray(await browser.ExecuteScriptAsync(
++            LikeScript.BuildCaptureRefreshKeys()));
++        Require(refreshCheckpoint.SequenceEqual(["refresh-old-a", "refresh-old-b"]),
++            $"刷新前应按顶部顺序保存动态锚点：{string.Join(',', refreshCheckpoint)}");
++
++        await browser.ExecuteScriptAsync("""
++            document.body.innerHTML = `
++              <article class="feed_item" data-tid="refresh-new-c">
++                <p>刷新后新到达动态 C</p><button title="赞" aria-pressed="false">赞</button>
++              </article>
++              <article class="feed_item" data-tid="refresh-old-a">
++                <p>刷新前顶部动态 A</p><button title="赞" aria-pressed="false">赞</button>
++              </article>
++              <article class="feed_item" data-tid="refresh-old-b">
++                <p>刷新前顶部动态 B</p><button title="赞" aria-pressed="false">赞</button>
++              </article>`;
++            true;
++            """);
++        const string afterRefreshTrackerId = "after-refresh";
++        LikeScript.ParseInteger(await browser.ExecuteScriptAsync(
++            LikeScript.BuildInitializeTracker(afterRefreshTrackerId, token)));
++        var refreshDiff = LikeScript.ParseRefreshDiffResult(await browser.ExecuteScriptAsync(
++            LikeScript.BuildApplyAndArmRefreshKeys(refreshCheckpoint, afterRefreshTrackerId, token)));
++        Require(refreshDiff is { Valid: true, AnchorFound: true, NewCount: 1, Armed: true },
++            $"刷新后只应识别旧锚点之前的一条新增动态：{refreshDiff}");
++        Require(LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
++            "globalThis.__qzaFeedTracker.newKeys.has('refresh-new-c')")),
++            "旧锚点之前的动态必须进入新动态队列");
++        Require(!LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
++            "globalThis.__qzaFeedTracker.newKeys.has('refresh-old-a') || globalThis.__qzaFeedTracker.newKeys.has('refresh-old-b')")),
++            "旧锚点及其后的历史动态不得进入新动态队列");
++
++        await browser.ExecuteScriptAsync("""
++            document.body.innerHTML = `
++              <article class="feed_item" data-tid="unrelated-x">
++                <p>完全不同的页面内容</p><button title="赞" aria-pressed="false">赞</button>
++              </article>`;
++            true;
++            """);
++        const string missingAnchorTrackerId = "missing-refresh-anchor";
++        LikeScript.ParseInteger(await browser.ExecuteScriptAsync(
++            LikeScript.BuildInitializeTracker(missingAnchorTrackerId, token)));
++        var missingAnchorDiff = LikeScript.ParseRefreshDiffResult(await browser.ExecuteScriptAsync(
++            LikeScript.BuildApplyAndArmRefreshKeys(refreshCheckpoint, missingAnchorTrackerId, token)));
++        Require(missingAnchorDiff is { Valid: true, AnchorFound: false, NewCount: 0, Armed: true },
++            "刷新后找不到旧锚点时必须保守地把整页视为历史内容");
++        Require(!LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
++            "globalThis.__qzaFeedTracker.newKeys.has('unrelated-x')")),
++            "无旧锚点的页面内容不得被误判为新动态");
++
++        await browser.ExecuteScriptAsync("""
++            document.body.innerHTML = `
++              <article class="feed_item">
++                <p>只有正文、没有稳定 ID 的动态</p><button title="赞" aria-pressed="false">赞</button>
++              </article>`;
++            true;
++            """);
++        Require(LikeScript.ParseStringArray(await browser.ExecuteScriptAsync(
++                LikeScript.BuildCaptureRefreshKeys())).Count == 0,
++            "没有 data-tid/data-feedskey/data-unikey/id 时不得用正文生成刷新锚点");
++
+         await browser.ExecuteScriptAsync("globalThis.__qzaFeedTracker = null");
+         var missing = LikeScript.ParseStartResult(await browser.ExecuteScriptAsync(
+             LikeScript.BuildStartAttempt(settings, Array.Empty<string>(), true, "new", bootstrapTrackerId, token)));
+diff --git a/tests/QzoneLikeAssistant.WebView2IntegrationTests/QzoneLikeAssistant.WebView2IntegrationTests.csproj b/tests/QzoneLikeAssistant.WebView2IntegrationTests/QzoneLikeAssistant.WebView2IntegrationTests.csproj
+index 1b7cdd1..c9e1136 100644
+--- a/tests/QzoneLikeAssistant.WebView2IntegrationTests/QzoneLikeAssistant.WebView2IntegrationTests.csproj
++++ b/tests/QzoneLikeAssistant.WebView2IntegrationTests/QzoneLikeAssistant.WebView2IntegrationTests.csproj
+@@ -19,5 +19,7 @@
+     <Compile Include="..\..\AttemptQuotaLedger.cs" Link="AttemptQuotaLedger.cs" />
+     <Compile Include="..\..\BoundedKeySet.cs" Link="BoundedKeySet.cs" />
+     <Compile Include="..\..\LikeScript.cs" Link="LikeScript.cs" />
++    <Compile Include="..\..\NavigationGeneration.cs" Link="NavigationGeneration.cs" />
++    <Compile Include="..\..\RefreshContextMatcher.cs" Link="RefreshContextMatcher.cs" />
+   </ItemGroup>
+ </Project>
+diff --git a/RefreshContextMatcher.cs b/RefreshContextMatcher.cs
+new file mode 100644
+index 0000000..3b4807c
+--- /dev/null
++++ b/RefreshContextMatcher.cs
+@@ -0,0 +1,49 @@
++namespace QzoneLikeAssistant;
++
++internal sealed record RefreshContextCheckpoint(bool IsMain, IReadOnlyList<string> Keys);
++
++internal static class RefreshContextMatcher
++{
++    private const int MinimumSharedKeys = 2;
++
++    public static IReadOnlyDictionary<int, int> Match(
++        IReadOnlyList<RefreshContextCheckpoint> previous,
++        IReadOnlyList<RefreshContextCheckpoint> current)
++    {
++        var candidatesByCurrent = new Dictionary<int, List<int>>();
++        var candidatesByPrevious = new Dictionary<int, List<int>>();
++
++        for (var currentIndex = 0; currentIndex < current.Count; currentIndex += 1)
++        {
++            var currentKeys = current[currentIndex].Keys
++                .Where(key => !string.IsNullOrWhiteSpace(key))
++                .ToHashSet(StringComparer.Ordinal);
++            if (currentKeys.Count < MinimumSharedKeys) continue;
++
++            for (var previousIndex = 0; previousIndex < previous.Count; previousIndex += 1)
++            {
++                if (current[currentIndex].IsMain != previous[previousIndex].IsMain) continue;
++                var shared = previous[previousIndex].Keys
++                    .Where(key => !string.IsNullOrWhiteSpace(key))
++                    .Distinct(StringComparer.Ordinal)
++                    .Count(currentKeys.Contains);
++                if (shared < MinimumSharedKeys) continue;
++
++                candidatesByCurrent.TryAdd(currentIndex, []);
++                candidatesByCurrent[currentIndex].Add(previousIndex);
++                candidatesByPrevious.TryAdd(previousIndex, []);
++                candidatesByPrevious[previousIndex].Add(currentIndex);
++            }
++        }
++
++        var matches = new Dictionary<int, int>();
++        foreach (var (currentIndex, previousCandidates) in candidatesByCurrent)
++        {
++            if (previousCandidates.Count != 1) continue;
++            var previousIndex = previousCandidates[0];
++            if (candidatesByPrevious[previousIndex].Count != 1) continue;
++            matches[currentIndex] = previousIndex;
++        }
++        return matches;
++    }
++}
+diff --git a/NavigationGeneration.cs b/NavigationGeneration.cs
+new file mode 100644
+index 0000000..dc721aa
+--- /dev/null
++++ b/NavigationGeneration.cs
+@@ -0,0 +1,32 @@
++namespace QzoneLikeAssistant;
++
++internal sealed class NavigationGeneration
++{
++    public ulong CurrentId { get; private set; }
++    public bool InProgress { get; private set; }
++
++    public void MarkPending()
++    {
++        CurrentId = 0;
++        InProgress = true;
++    }
++
++    public void Start(ulong navigationId)
++    {
++        CurrentId = navigationId;
++        InProgress = true;
++    }
++
++    public bool TryComplete(ulong navigationId)
++    {
++        if (!InProgress || CurrentId != navigationId) return false;
++        Reset();
++        return true;
++    }
++
++    public void Reset()
++    {
++        CurrentId = 0;
++        InProgress = false;
++    }
++}
