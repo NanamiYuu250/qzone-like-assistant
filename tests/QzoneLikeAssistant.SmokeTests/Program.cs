@@ -61,6 +61,33 @@ Require(cooldownLedger.Register("cooldown-attempt", cooldownSettings, cooldownAt
 var restartSession = new AutomationSession();
 restartSession.Start();
 restartSession.Stop();
+
+var backfill = new BackfillRunState();
+var backfillStartedAt = DateTime.UtcNow;
+backfill.Start(enabled: true, scrollLimit: 30, backfillStartedAt, TimeSpan.FromMinutes(3));
+backfill.BeginTopPass();
+backfill.RegisterAttempt();
+backfill.CancelPass();
+var remainingBeforeRefresh = backfill.ScrollsRemaining;
+var deadlineBeforeRefresh = backfill.DeadlineUtc;
+var sessionBeforeRefresh = backfill.SessionId;
+backfill.ResetPageContext(enabled: true);
+Require(backfill.ScrollsRemaining == remainingBeforeRefresh && backfill.Attempts == 1,
+    "页面刷新或 frame 替换不得清空未完成的启动回扫进度");
+Require(backfill.DeadlineUtc == deadlineBeforeRefresh && backfill.CanContinue(true, 20, backfillStartedAt.AddSeconds(10)),
+    "页面刷新后应沿用原回扫截止时间并继续历史扫描");
+Require(backfill.SessionId == sessionBeforeRefresh,
+    "页面基线重建不得孤立仍处于 active 状态的回扫脚本会话");
+backfill.BeginTopPass();
+Require(!backfill.CanExecutePending(true, 20, backfill.DeadlineUtc),
+    "截止时间前排队但到期后才执行的回扫 pass 必须被取消");
+Require(!backfill.CanExecutePending(true, 20, backfill.DeadlineUtc.AddMinutes(1)),
+    "pending pass 的到期清理必须独立于任意较长的点赞冷却时间");
+backfill.CancelPass();
+backfill.Finish();
+backfill.ResetPageContext(enabled: true);
+Require(!backfill.CanContinue(true, 20, backfillStartedAt.AddSeconds(20)),
+    "已完成的回扫不得因后续自动刷新而重新开始消耗额度");
 restartSession.Start();
 Require(!cooldownSettings.IsActionCooldownElapsed(cooldownAt.AddSeconds(2)),
     "停止后立即重启不得绕过最短操作间隔");
@@ -129,7 +156,10 @@ var scripts = new Dictionary<string, string>
     ["refresh-capture"] = LikeScript.BuildCaptureRefreshKeys(),
     ["refresh-apply-arm"] = LikeScript.BuildApplyAndArmRefreshKeys(["old-1"], "tracker-test", "token-test"),
     ["invalidate"] = LikeScript.BuildInvalidateAutomation("token-test"),
-    ["backfill"] = LikeScript.BuildBackfillScroll("backfill-test", "token-test"),
+    ["backfill-active"] = LikeScript.BuildSetBackfillActive("backfill-test", "token-test", true),
+    ["backfill-inactive"] = LikeScript.BuildSetBackfillActive("backfill-test", "token-test", false),
+    ["backfill-frame"] = LikeScript.BuildBackfillScroll("backfill-test", "token-test"),
+    ["backfill-host"] = LikeScript.BuildBackfillScroll("backfill-test", "token-test", true),
     ["return-top"] = LikeScript.BuildReturnToTop("backfill-test")
 };
 
@@ -153,7 +183,7 @@ Require(!LikeScript.BuildCaptureRefreshKeys().Contains("innerText", StringCompar
     "刷新锚点脚本不得退化到不稳定的正文文本");
 await CheckRefreshDiffBehaviorAsync();
 
-Console.WriteLine("Smoke tests passed: defaults, V5 migration preservation, navigation generations, context-safe refresh matching, atomic refresh arm, persistent restart cooldown, stopped-race quota, session invalidation, FIFO eviction, generated JavaScript syntax.");
+Console.WriteLine("Smoke tests passed: defaults, V5 migration preservation, navigation generations, context-safe refresh matching, atomic refresh arm, refresh-safe backfill progress, persistent restart cooldown, stopped-race quota, session invalidation, FIFO eviction, generated JavaScript syntax.");
 
 static void Require(bool condition, string message)
 {

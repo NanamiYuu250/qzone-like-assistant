@@ -8,6 +8,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
+    <Version>1.10.1</Version>
   </PropertyGroup>
 
   <ItemGroup>

@@ -11,6 +11,7 @@
     <Compile Include="..\..\AutomationSession.cs" Link="AutomationSession.cs" />
     <Compile Include="..\..\AttemptQuotaLedger.cs" Link="AttemptQuotaLedger.cs" />
     <Compile Include="..\..\BoundedKeySet.cs" Link="BoundedKeySet.cs" />
+    <Compile Include="..\..\BackfillRunState.cs" Link="BackfillRunState.cs" />
     <Compile Include="..\..\LikeScript.cs" Link="LikeScript.cs" />
     <Compile Include="..\..\NavigationGeneration.cs" Link="NavigationGeneration.cs" />
     <Compile Include="..\..\RefreshContextMatcher.cs" Link="RefreshContextMatcher.cs" />
