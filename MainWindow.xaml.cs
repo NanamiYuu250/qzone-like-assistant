@@ -173,7 +173,7 @@ public partial class MainWindow : Window
         scanTimer.Interval = TimeSpan.FromSeconds(settings.ScanSeconds);
         scanTimer.Start();
         ToggleButton.Content = "停止自动点赞";
-        ToggleButton.Background = new SolidColorBrush(Color.FromRgb(218, 74, 88));
+        ToggleButton.Background = new SolidColorBrush(Color.FromRgb(181, 95, 112));
         UpdateStatus("运行中", settings.BackfillOnStart ? "正在回扫启动前的已有动态" : "正在监听当前好友动态", true);
         _ = ScanOnceAsync();
     }
@@ -187,6 +187,7 @@ public partial class MainWindow : Window
         if (backfillPassPending) _ = ReturnToTopAsync();
         backfillPassPending = false;
         ToggleButton.Content = "开启自动点赞";
+        ToggleButton.Background = new SolidColorBrush(Color.FromRgb(215, 123, 138));
         UpdateStatus("未开启", message, false);
     }
 
@@ -777,7 +778,7 @@ public partial class MainWindow : Window
     {
         StatusTitle.Text = title;
         StatusMessage.Text = message;
-        StatusDot.Fill = new SolidColorBrush(active ? Color.FromRgb(48, 200, 119) : Color.FromRgb(101, 115, 140));
+        StatusDot.Fill = new SolidColorBrush(active ? Color.FromRgb(76, 151, 112) : Color.FromRgb(181, 163, 170));
         TodayCount.Text = $"成功 {settings.TodayCount} / 尝试 {settings.TodayAttemptCount}";
     }
 

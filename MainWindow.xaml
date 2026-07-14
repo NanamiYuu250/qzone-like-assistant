@@ -3,19 +3,20 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         Title="QQ空间点赞助手"
-        Width="1360" Height="860"
-        MinWidth="1100" MinHeight="700"
+        Icon="Assets/AppIcon.ico"
+        Width="1400" Height="880"
+        MinWidth="1120" MinHeight="720"
         WindowStartupLocation="CenterScreen"
-        Background="#07101E"
+        Background="#F6F1F2"
         FontFamily="Microsoft YaHei UI"
         TextOptions.TextFormattingMode="Display">
-    <Grid>
+    <Grid Background="#F6F1F2">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="372" />
+            <ColumnDefinition Width="398" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <Border Grid.Column="0" Background="#0A1322" BorderBrush="#1B2940" BorderThickness="0,0,1,0">
+        <Border Grid.Column="0" Background="White" BorderBrush="#E8DDE0" BorderThickness="0,0,1,0">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -23,30 +24,36 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <Grid Margin="28,26,28,18">
+                <Border Background="#FBE6EA" BorderBrush="#E9CDD3" BorderThickness="0,0,0,1"
+                        Padding="28,23,28,20">
+                    <Grid>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="52" />
+                        <ColumnDefinition Width="54" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
-                    <Border Width="44" Height="44" CornerRadius="14">
-                        <Border.Background>
-                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                <GradientStop Color="#4D94FF" Offset="0" />
-                                <GradientStop Color="#7D5BFA" Offset="1" />
-                            </LinearGradientBrush>
-                        </Border.Background>
-                        <TextBlock Text="赞" Foreground="White" FontSize="20" FontWeight="Bold"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <Border Width="44" Height="44" CornerRadius="14" Background="#E79AA7">
+                        <Grid>
+                            <TextBlock Text="♥" Foreground="White" FontSize="24" FontWeight="Bold"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-2,0,0" />
+                            <Border Width="15" Height="15" CornerRadius="8" Background="White"
+                                    HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,3,3">
+                                <TextBlock Text="✓" Foreground="#C96678" FontSize="9" FontWeight="Bold"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                        </Grid>
                     </Border>
                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                        <TextBlock Text="QQ空间点赞助手" Foreground="#F5F8FD" FontSize="18" FontWeight="SemiBold" />
-                        <TextBlock Text="LOCAL · PRIVATE · CONTROLLED" Foreground="#61708B" FontSize="9" Margin="0,4,0,0" />
+                        <TextBlock Text="QQ空间点赞助手" Foreground="#3B3036" FontSize="18" FontWeight="SemiBold" />
+                        <TextBlock Text="本地运行 · 登录隔离 · 策略可控" Foreground="#917B83" FontSize="10" Margin="0,4,0,0" />
                     </StackPanel>
-                </Grid>
+                    </Grid>
+                </Border>
 
-                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled">
-                    <StackPanel Margin="28,4,28,24">
-                        <Border CornerRadius="17" Background="#111C30" BorderBrush="#24334E" BorderThickness="1" Padding="17" Margin="0,0,0,22">
+                <ScrollViewer Grid.Row="1" Background="White"
+                              VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="28,22,28,24">
+                        <Border CornerRadius="14" Background="White" BorderBrush="#E8DDE0" BorderThickness="1"
+                                Padding="17" Margin="0,0,0,22" Effect="{StaticResource CardShadow}">
                             <StackPanel>
                                 <Grid>
                                     <Grid.ColumnDefinitions>
@@ -54,93 +61,108 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <Ellipse x:Name="StatusDot" Width="9" Height="9" Fill="#65738C" VerticalAlignment="Center" Margin="0,0,10,0" />
-                                    <TextBlock x:Name="StatusTitle" Grid.Column="1" Text="未开启" Foreground="#F5F8FD" FontSize="14" FontWeight="SemiBold" />
-                                    <Border Grid.Column="2" CornerRadius="10" Background="#18263D" Padding="9,4">
-                                        <TextBlock x:Name="TodayCount" Text="今日 0 次" Foreground="#94A2B9" FontSize="11" />
+                                    <Ellipse x:Name="StatusDot" Width="9" Height="9" Fill="#B5A3AA"
+                                             VerticalAlignment="Center" Margin="0,0,10,0" />
+                                    <TextBlock x:Name="StatusTitle" Grid.Column="1" Text="未开启"
+                                               Foreground="#3B3036" FontSize="14" FontWeight="SemiBold" />
+                                    <Border Grid.Column="2" CornerRadius="9" Background="#F8F0F2" Padding="9,4">
+                                        <TextBlock x:Name="TodayCount" Text="今日 0 次" Foreground="#786A71" FontSize="11" />
                                     </Border>
                                 </Grid>
-                                <TextBlock x:Name="StatusMessage" Text="正在初始化 Edge 登录视图" Foreground="#8492A9" FontSize="12"
-                                           TextWrapping="Wrap" Margin="19,12,0,0" LineHeight="18" />
+                                <TextBlock x:Name="StatusMessage" Text="正在初始化 Edge 登录视图" Foreground="#8D7D84"
+                                           FontSize="12" TextWrapping="Wrap" Margin="19,11,0,0" LineHeight="18" />
                             </StackPanel>
                         </Border>
 
-                        <TextBlock Text="运行策略" Foreground="#73829C" FontSize="11" FontWeight="SemiBold" Margin="2,0,0,12" />
+                        <TextBlock Text="运行策略" Foreground="#6D5A62" FontSize="12" FontWeight="SemiBold" Margin="2,0,0,10" />
+                        <Border CornerRadius="14" Background="White" BorderBrush="#E8DDE0" BorderThickness="1"
+                                Padding="16,8" Margin="0,0,0,20">
+                            <StackPanel>
+                                <Grid Margin="0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="82" />
+                                        <ColumnDefinition Width="28" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="扫描间隔" Foreground="#493B42" FontSize="13" />
+                                        <TextBlock Text="检测好友动态的频率" Foreground="#A49198" FontSize="10" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                    <TextBox x:Name="ScanSecondsBox" Grid.Column="1" TextAlignment="Right" />
+                                    <TextBlock Grid.Column="2" Text="秒" Foreground="#9B8990" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                                </Grid>
+                                <Border Height="1" Background="#F2E9EB" />
 
-                        <Grid Margin="0,0,0,12">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="82" />
-                                <ColumnDefinition Width="28" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="扫描间隔" Foreground="#E6EBF4" FontSize="13" />
-                                <TextBlock Text="1–60 秒，检测好友动态" Foreground="#687792" FontSize="10" Margin="0,3,0,0" />
+                                <Grid Margin="0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="82" />
+                                        <ColumnDefinition Width="28" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="点赞冷却" Foreground="#493B42" FontSize="13" />
+                                        <TextBlock Text="两次操作之间的最短间隔" Foreground="#A49198" FontSize="10" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                    <TextBox x:Name="MinActionSecondsBox" Grid.Column="1" TextAlignment="Right" />
+                                    <TextBlock Grid.Column="2" Text="秒" Foreground="#9B8990" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                                </Grid>
+                                <Border Height="1" Background="#F2E9EB" />
+
+                                <Grid Margin="0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="82" />
+                                        <ColumnDefinition Width="28" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="每日上限" Foreground="#493B42" FontSize="13" />
+                                        <TextBlock Text="达到尝试额度后自动停止" Foreground="#A49198" FontSize="10" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                    <TextBox x:Name="DailyLimitBox" Grid.Column="1" TextAlignment="Right" />
+                                    <TextBlock Grid.Column="2" Text="次" Foreground="#9B8990" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                                </Grid>
+                                <Border Height="1" Background="#F2E9EB" />
+
+                                <Grid Margin="0,11">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="启动回扫" Foreground="#493B42" FontSize="13" />
+                                        <TextBlock Text="处理开启前已经加载的动态" Foreground="#A49198" FontSize="10" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="BackfillOnStartBox" Grid.Column="1" Content="开启"
+                                              HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                </Grid>
+                                <Border Height="1" Background="#F2E9EB" />
+
+                                <Grid Margin="0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="82" />
+                                        <ColumnDefinition Width="28" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="回扫点赞上限" Foreground="#493B42" FontSize="13" />
+                                        <TextBlock Text="最多占每日额度的 30%" Foreground="#A49198" FontSize="10" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                    <TextBox x:Name="BackfillLikeLimitBox" Grid.Column="1" TextAlignment="Right" />
+                                    <TextBlock Grid.Column="2" Text="次" Foreground="#9B8990" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                                </Grid>
                             </StackPanel>
-                            <TextBox x:Name="ScanSecondsBox" Grid.Column="1" TextAlignment="Right" />
-                            <TextBlock Grid.Column="2" Text="秒" Foreground="#7887A0" VerticalAlignment="Center" HorizontalAlignment="Right" />
-                        </Grid>
+                        </Border>
 
-                        <Grid Margin="0,0,0,12">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="82" />
-                                <ColumnDefinition Width="28" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="点赞冷却" Foreground="#E6EBF4" FontSize="13" />
-                                <TextBlock Text="1–600 秒，默认 3 秒" Foreground="#687792" FontSize="10" Margin="0,3,0,0" />
+                        <TextBlock Text="内容过滤" Foreground="#6D5A62" FontSize="12" FontWeight="SemiBold" Margin="2,0,0,10" />
+                        <Border CornerRadius="14" Background="White" BorderBrush="#E8DDE0" BorderThickness="1"
+                                Padding="16" Margin="0,0,0,20">
+                            <StackPanel>
+                                <TextBlock Text="包含关键词" Foreground="#594950" FontSize="12" Margin="1,0,0,7" />
+                                <TextBox x:Name="IncludeKeywordsBox" ToolTip="留空表示不限，例如：生日，毕业" Margin="0,0,0,14" />
+                                <TextBlock Text="排除关键词" Foreground="#594950" FontSize="12" Margin="1,0,0,7" />
+                                <TextBox x:Name="ExcludeKeywordsBox" ToolTip="使用逗号分隔" />
                             </StackPanel>
-                            <TextBox x:Name="MinActionSecondsBox" Grid.Column="1" TextAlignment="Right" />
-                            <TextBlock Grid.Column="2" Text="秒" Foreground="#7887A0" VerticalAlignment="Center" HorizontalAlignment="Right" />
-                        </Grid>
-
-                        <Grid Margin="0,0,0,12">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="82" />
-                                <ColumnDefinition Width="28" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="每日上限" Foreground="#E6EBF4" FontSize="13" />
-                                <TextBlock Text="1–5000 次，达到后停止" Foreground="#687792" FontSize="10" Margin="0,3,0,0" />
-                            </StackPanel>
-                            <TextBox x:Name="DailyLimitBox" Grid.Column="1" TextAlignment="Right" />
-                            <TextBlock Grid.Column="2" Text="次" Foreground="#7887A0" VerticalAlignment="Center" HorizontalAlignment="Right" />
-                        </Grid>
-
-                        <Grid Margin="0,0,0,12">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="110" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="启动回扫" Foreground="#E6EBF4" FontSize="13" />
-                                <TextBlock Text="加载并处理开启前的已有动态" Foreground="#687792" FontSize="10" Margin="0,3,0,0" />
-                            </StackPanel>
-                            <CheckBox x:Name="BackfillOnStartBox" Grid.Column="1" Content="开启" Foreground="#A9B6CA"
-                                      HorizontalAlignment="Right" VerticalAlignment="Center" />
-                        </Grid>
-
-                        <Grid Margin="0,0,0,18">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="82" />
-                                <ColumnDefinition Width="28" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="回扫点赞上限" Foreground="#E6EBF4" FontSize="13" />
-                                <TextBlock Text="最多占每日额度的 30%" Foreground="#687792" FontSize="10" Margin="0,3,0,0" />
-                            </StackPanel>
-                            <TextBox x:Name="BackfillLikeLimitBox" Grid.Column="1" TextAlignment="Right" />
-                            <TextBlock Grid.Column="2" Text="次" Foreground="#7887A0" VerticalAlignment="Center" HorizontalAlignment="Right" />
-                        </Grid>
-
-                        <TextBlock Text="内容过滤" Foreground="#73829C" FontSize="11" FontWeight="SemiBold" Margin="2,0,0,10" />
-                        <TextBlock Text="包含关键词" Foreground="#DDE4EF" FontSize="12" Margin="2,0,0,7" />
-                        <TextBox x:Name="IncludeKeywordsBox" ToolTip="留空表示不限，例如：生日，毕业" Margin="0,0,0,12" />
-                        <TextBlock Text="排除关键词" Foreground="#DDE4EF" FontSize="12" Margin="2,0,0,7" />
-                        <TextBox x:Name="ExcludeKeywordsBox" ToolTip="使用逗号分隔" Margin="0,0,0,20" />
+                        </Border>
 
                         <Button x:Name="ToggleButton" Content="开启自动点赞" Style="{StaticResource PrimaryButton}" Click="ToggleButton_Click" />
                         <Grid Margin="0,10,0,0">
@@ -150,76 +172,85 @@
                                 <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
                             <Button Content="刷新空间" Style="{StaticResource SecondaryButton}" Click="RefreshButton_Click" />
-                            <Button Grid.Column="2" Content="退出并清除登录" Foreground="#F18A93" Style="{StaticResource SecondaryButton}" Click="ClearButton_Click" />
+                            <Button Grid.Column="2" Content="退出并清除登录" Foreground="#B25F70"
+                                    Style="{StaticResource SecondaryButton}" Click="ClearButton_Click" />
                         </Grid>
 
-                        <Border CornerRadius="14" Background="#0E1A2D" BorderBrush="#1B3150" BorderThickness="1" Padding="14" Margin="0,18,0,0">
+                        <Border CornerRadius="12" Background="#FBECEF" BorderBrush="#F2D3D9" BorderThickness="1"
+                                Padding="14" Margin="0,18,0,0">
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="28" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Text="◈" Foreground="#68A1FF" FontSize="16" />
+                                <Border Width="20" Height="20" CornerRadius="10" Background="#F3D1D8" VerticalAlignment="Top">
+                                    <TextBlock Text="i" Foreground="#B45E70" FontSize="12" FontWeight="Bold"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
                                 <TextBlock Grid.Column="1" Text="登录发生在腾讯官方页面内。应用不读取密码，只保留本机登录会话。"
-                                           Foreground="#8291A9" FontSize="11" TextWrapping="Wrap" LineHeight="17" />
+                                           Foreground="#785B64" FontSize="11" TextWrapping="Wrap" LineHeight="17" />
                             </Grid>
                         </Border>
                     </StackPanel>
                 </ScrollViewer>
 
-                <Grid Grid.Row="2" Margin="28,12,28,22">
-                    <TextBlock Text="QZONE ASSISTANT" Foreground="#43506A" FontSize="9" />
-                    <TextBlock Text="v1.8" Foreground="#43506A" FontSize="9" HorizontalAlignment="Right" />
-                </Grid>
+                <Border Grid.Row="2" Background="White" BorderBrush="#F0E7E9" BorderThickness="0,1,0,0">
+                    <Grid Margin="28,11,28,18">
+                        <TextBlock Text="QZONE ASSISTANT" Foreground="#B3A2A8" FontSize="9" />
+                        <Border HorizontalAlignment="Right" CornerRadius="8" Background="#F3EAEC" Padding="7,3">
+                            <TextBlock Text="v1.9" Foreground="#8E7B82" FontSize="9" />
+                        </Border>
+                    </Grid>
+                </Border>
             </Grid>
         </Border>
 
-        <Grid Grid.Column="1" Background="#EEF2F8">
+        <Grid Grid.Column="1" Background="#F6F1F2">
             <Grid.RowDefinitions>
-                <RowDefinition Height="60" />
+                <RowDefinition Height="68" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <Border Background="#FAFCFF" BorderBrush="#DDE4EE" BorderThickness="0,0,0,1">
-                <Grid Margin="20,0">
+            <Border Background="#FFFFFF" BorderBrush="#E8DDE0" BorderThickness="0,0,0,1">
+                <Grid Margin="24,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBlock Text="QQ 空间" Foreground="#1A2940" FontSize="15" FontWeight="SemiBold" />
-                        <Border CornerRadius="9" Background="#E8F6EE" Padding="8,3" Margin="10,0,0,0">
+                        <TextBlock Text="QQ 空间" Foreground="#3B3036" FontSize="16" FontWeight="SemiBold" />
+                        <Border CornerRadius="9" Background="#EAF6EF" Padding="8,3" Margin="11,0,0,0">
                             <StackPanel Orientation="Horizontal">
-                                <Ellipse Width="6" Height="6" Fill="#2FB66D" VerticalAlignment="Center" Margin="0,0,5,0" />
-                                <TextBlock Text="腾讯官方页面" Foreground="#268555" FontSize="10" />
+                                <Ellipse Width="6" Height="6" Fill="#2E9467" VerticalAlignment="Center" Margin="0,0,5,0" />
+                                <TextBlock Text="腾讯官方页面" Foreground="#287A58" FontSize="10" />
                             </StackPanel>
                         </Border>
                     </StackPanel>
-                    <TextBlock Grid.Column="1" Text="登录后进入好友动态即可开始" Foreground="#8693A6" FontSize="11"
+                    <TextBlock Grid.Column="1" Text="登录后进入好友动态，即可开始运行" Foreground="#9B8990" FontSize="11"
                                HorizontalAlignment="Center" VerticalAlignment="Center" />
-                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                        <Button Content="重新加载" Width="82" Style="{StaticResource SecondaryButton}" Foreground="#53627A"
-                                Background="#F4F7FB" BorderBrush="#DCE4EF" Click="RefreshButton_Click" />
-                    </StackPanel>
+                    <Button Grid.Column="2" Content="重新加载" Width="88" Style="{StaticResource SecondaryButton}"
+                            Click="RefreshButton_Click" />
                 </Grid>
             </Border>
 
-            <Grid Grid.Row="1" Margin="14">
-                <Border Background="White" CornerRadius="16" BorderBrush="#DDE4EE" BorderThickness="1">
+            <Grid Grid.Row="1" Margin="18">
+                <Border Background="White" CornerRadius="14" BorderBrush="#E8DDE0" BorderThickness="1">
                     <Grid>
                         <wv2:WebView2 x:Name="Browser" />
-                        <Grid x:Name="BrowserErrorOverlay" Background="#F8FAFD" Visibility="Collapsed">
-                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="360">
-                                <Border Width="72" Height="72" CornerRadius="22" Background="#E9F0FB" HorizontalAlignment="Center">
-                                    <TextBlock Text="☁" Foreground="#6685B3" FontSize="34" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        <Grid x:Name="BrowserErrorOverlay" Background="#FFFBFC" Visibility="Collapsed">
+                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="370">
+                                <Border Width="70" Height="70" CornerRadius="20" Background="#F8E8EB" HorizontalAlignment="Center">
+                                    <TextBlock Text="☁" Foreground="#B47B86" FontSize="32"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
                                 </Border>
-                                <TextBlock Text="暂时无法连接 QQ 空间" Foreground="#1A2940" FontSize="22" FontWeight="SemiBold"
+                                <TextBlock Text="暂时无法连接 QQ 空间" Foreground="#3B3036" FontSize="22" FontWeight="SemiBold"
                                            HorizontalAlignment="Center" Margin="0,22,0,0" />
                                 <TextBlock x:Name="BrowserErrorText" Text="腾讯页面关闭了当前连接，请检查网络后重试。"
-                                           Foreground="#7A879A" FontSize="12" TextAlignment="Center" TextWrapping="Wrap"
+                                           Foreground="#8D7D84" FontSize="12" TextAlignment="Center" TextWrapping="Wrap"
                                            HorizontalAlignment="Center" Margin="0,10,0,0" LineHeight="20" />
-                                <Button Content="重新连接" Width="132" Margin="0,24,0,0" Style="{StaticResource PrimaryButton}" Click="RetryButton_Click" />
+                                <Button Content="重新连接" Width="132" Margin="0,24,0,0"
+                                        Style="{StaticResource PrimaryButton}" Click="RetryButton_Click" />
                             </StackPanel>
                         </Grid>
                     </Grid>
