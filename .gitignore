@@ -3,6 +3,7 @@ release/
 bin/
 obj/
 publish*/
+review-logs/
 TestResults/
 .vs/
 *.user
