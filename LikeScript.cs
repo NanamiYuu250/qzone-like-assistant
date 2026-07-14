@@ -20,6 +20,8 @@ internal static class LikeScript
 
     internal sealed record TrackerSnapshot(bool Valid, int ItemCount, bool Armed);
 
+    internal sealed record RefreshDiffResult(bool Valid, bool AnchorFound, int NewCount, bool Armed);
+
     public static string BuildStartAttempt(
         AppSettings settings,
         IEnumerable<string> processedKeys,
@@ -331,6 +333,104 @@ internal static class LikeScript
         """;
     }
 
+    public static string BuildCaptureRefreshKeys(int maxKeys = 60)
+    {
+        maxKeys = Math.Clamp(maxKeys, 1, 200);
+        return $$"""
+        (() => {
+          const buttonSelector = [
+            'a.qz_like_btn_v3', '.qz_like_btn_v3', '[data-optype="like"]',
+            '[data-op="like"]', '[data-action="like"]', 'a[title="赞"]',
+            'button[aria-label="赞"]', 'button[title="赞"]'
+          ].join(',');
+          const itemSelector = [
+            '[data-tid]', '[data-feedskey]', '[data-unikey]', '.f-single',
+            '.feed_item', '.feed-item', '.qz-feed', 'article'
+          ].join(',');
+          const keyFor = item => item.getAttribute('data-tid') ||
+            item.getAttribute('data-feedskey') || item.getAttribute('data-unikey') ||
+            item.id || null;
+          const keys = [];
+          const seen = new Set();
+          for (const button of document.querySelectorAll(buttonSelector)) {
+            const item = button.closest(itemSelector);
+            const key = item && keyFor(item);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            keys.push(key);
+            if (keys.length >= {{maxKeys}}) break;
+          }
+          return keys;
+        })()
+        """;
+    }
+
+    public static string BuildApplyAndArmRefreshKeys(
+        IEnumerable<string> previousTopKeys,
+        string trackerId,
+        string automationToken)
+    {
+        var config = JsonSerializer.Serialize(new
+        {
+            previousTopKeys = previousTopKeys.Take(200).ToArray(),
+            trackerId,
+            automationToken
+        });
+        return $$"""
+        (() => {
+          const config = {{config}};
+          const tracker = globalThis.__qzaFeedTracker;
+          if (globalThis.__qzaAutomationSession !== config.automationToken ||
+              tracker?.trackerId !== config.trackerId ||
+              tracker?.automationToken !== config.automationToken) {
+             return { valid: false, anchorFound: false, newCount: 0, armed: false };
+          }
+          const buttonSelector = [
+            'a.qz_like_btn_v3', '.qz_like_btn_v3', '[data-optype="like"]',
+            '[data-op="like"]', '[data-action="like"]', 'a[title="赞"]',
+            'button[aria-label="赞"]', 'button[title="赞"]'
+          ].join(',');
+          const itemSelector = [
+            '[data-tid]', '[data-feedskey]', '[data-unikey]', '.f-single',
+            '.feed_item', '.feed-item', '.qz-feed', 'article'
+          ].join(',');
+          const keyFor = item => item.getAttribute('data-tid') ||
+            item.getAttribute('data-feedskey') || item.getAttribute('data-unikey') ||
+            item.id || null;
+          const oldKeys = new Set(config.previousTopKeys);
+          const currentKeys = [];
+          const seen = new Set();
+          for (const button of document.querySelectorAll(buttonSelector)) {
+            const item = button.closest(itemSelector);
+            const key = item && keyFor(item);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            currentKeys.push(key);
+            if (currentKeys.length >= 200) break;
+          }
+          const anchorIndex = currentKeys.findIndex(key => oldKeys.has(key));
+          if (anchorIndex < 0) {
+            tracker.bootstrapComplete = true;
+            tracker.reconcileDeferred?.();
+            return { valid: true, anchorFound: false, newCount: 0, armed: true };
+          }
+          let newCount = 0;
+          for (const key of currentKeys.slice(0, Math.min(anchorIndex, 20))) {
+            if (tracker.newKeys.has(key)) continue;
+            tracker.newKeys.add(key);
+            tracker.newOrder.push(key);
+            newCount += 1;
+          }
+          while (tracker.newOrder.length > 500) {
+            tracker.newKeys.delete(tracker.newOrder.shift());
+          }
+          tracker.bootstrapComplete = true;
+          tracker.reconcileDeferred?.();
+          return { valid: true, anchorFound: true, newCount, armed: true };
+        })()
+        """;
+    }
+
     public static string BuildArmTracker(string trackerId, string automationToken)
     {
         var trackerJson = JsonSerializer.Serialize(trackerId);
@@ -452,6 +552,33 @@ internal static class LikeScript
 
     public static int ParseInteger(string json) =>
         int.TryParse(json, out var value) ? value : 0;
+
+    public static IReadOnlyList<string> ParseStringArray(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<string[]>(json) ?? [];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    public static RefreshDiffResult? ParseRefreshDiffResult(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<RefreshDiffResult>(json, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     public static Result? ParseResult(string json)
     {
