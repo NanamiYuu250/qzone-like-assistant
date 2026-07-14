@@ -189,6 +189,13 @@ internal static class LikeScript
           const trackerId = {{trackerJson}};
           const automationToken = {{tokenJson}};
           globalThis.__qzaAutomationSession = automationToken;
+          const previousBackfill = globalThis.__qzaBackfillState;
+          if (previousBackfill) {
+            previousBackfill.active = false;
+            if (previousBackfill.automationToken !== automationToken) {
+              globalThis.__qzaBackfillState = null;
+            }
+          }
           if (globalThis.__qzaFeedTracker?.observer) {
             globalThis.__qzaFeedTracker.observer.disconnect();
           }
@@ -263,7 +270,7 @@ internal static class LikeScript
               const key = keyFor(item);
               const backfilling = globalThis.__qzaBackfillState?.active === true;
               if ((deferDuringBackfill || backfilling) && key && !state.knownKeys.has(key)) {
-                state.deferredKeys.set(key, Date.now());
+                state.deferredKeys.set(key, { createdAt: Date.now(), suppressNew: true });
                 if (!backfilling) setTimeout(() => state.reconcileDeferred?.(), 0);
                 continue;
               }
@@ -281,10 +288,15 @@ internal static class LikeScript
               if (key) visibleItems.set(key, item);
             }
             const now = Date.now();
-            for (const [key, createdAt] of [...state.deferredKeys]) {
+            for (const [key, deferred] of [...state.deferredKeys]) {
+              const createdAt = typeof deferred === 'number' ? deferred : deferred.createdAt;
+              const suppressNew = typeof deferred === 'number' || deferred.suppressNew === true;
               const item = visibleItems.get(key);
               if (item) {
-                remember(key, state.bootstrapComplete && isNearTop(item));
+                // Position after returning to the top cannot distinguish a lazily
+                // loaded historical item from a genuinely new one. Anything first
+                // observed during backfill is therefore historical by policy.
+                remember(key, !suppressNew && state.bootstrapComplete && isNearTop(item));
                 state.deferredKeys.delete(key);
               } else if (now - createdAt > 15000) {
                 state.deferredKeys.delete(key);
@@ -470,33 +482,76 @@ internal static class LikeScript
         """;
     }
 
-    public static string BuildBackfillScroll(string sessionId, string automationToken)
+    public static string BuildSetBackfillActive(
+        string sessionId,
+        string automationToken,
+        bool active)
     {
         var sessionJson = JsonSerializer.Serialize(sessionId);
         var tokenJson = JsonSerializer.Serialize(automationToken);
+        var activeJson = active ? "true" : "false";
         return $$"""
         (() => {
           const sessionId = {{sessionJson}};
           const automationToken = {{tokenJson}};
+          const active = {{activeJson}};
+          if (globalThis.__qzaAutomationSession !== automationToken) return false;
+          let state = globalThis.__qzaBackfillState;
+          if (!state || state.sessionId !== sessionId) {
+            if (!active) {
+              setTimeout(() => globalThis.__qzaFeedTracker?.reconcileDeferred?.(), 120);
+              return true;
+            }
+            state = globalThis.__qzaBackfillState = {
+              sessionId, automationToken, offset: 0, element: null, active: false
+            };
+          }
+          if (state.automationToken !== automationToken) return false;
+          state.active = active;
+          if (!active) {
+            setTimeout(() => globalThis.__qzaFeedTracker?.reconcileDeferred?.(), 120);
+          }
+          return true;
+        })()
+        """;
+    }
+
+    public static string BuildBackfillScroll(
+        string sessionId,
+        string automationToken,
+        bool allowHostDocumentWithoutButtons = false)
+    {
+        var sessionJson = JsonSerializer.Serialize(sessionId);
+        var tokenJson = JsonSerializer.Serialize(automationToken);
+        var allowHostJson = allowHostDocumentWithoutButtons ? "true" : "false";
+        return $$"""
+        (() => {
+          const sessionId = {{sessionJson}};
+          const automationToken = {{tokenJson}};
+          const allowHostDocumentWithoutButtons = {{allowHostJson}};
           if (globalThis.__qzaAutomationSession !== automationToken) return false;
           const buttonSelector = [
             'a.qz_like_btn_v3', '.qz_like_btn_v3', '[data-optype="like"]',
             '[data-op="like"]', '[data-action="like"]', 'a[title="赞"]',
             'button[aria-label="赞"]', 'button[title="赞"]'
           ].join(',');
-          if (!document.querySelector(buttonSelector)) return false;
-          if (!globalThis.__qzaBackfillState || globalThis.__qzaBackfillState.sessionId !== sessionId) {
-            globalThis.__qzaBackfillState = {
-              sessionId, automationToken, offset: 0, element: null, active: false
-            };
-          }
+          const hasLikeButtons = Boolean(document.querySelector(buttonSelector));
+          const visibleHostFrames = [...document.querySelectorAll('iframe')].filter(frame => {
+            const style = getComputedStyle(frame);
+            const rect = frame.getBoundingClientRect();
+            return style.visibility !== 'hidden' && style.display !== 'none' &&
+              rect.width > 0 && rect.height > 0;
+          });
+          if (!hasLikeButtons && (!allowHostDocumentWithoutButtons || visibleHostFrames.length === 0)) return false;
           const state = globalThis.__qzaBackfillState;
-          state.active = true;
+          if (!state || state.sessionId !== sessionId ||
+              state.automationToken !== automationToken || state.active !== true) return false;
           const candidates = [document.scrollingElement, document.documentElement, document.body];
           for (const element of document.querySelectorAll('*')) {
             const style = getComputedStyle(element);
             if ((style.overflowY === 'auto' || style.overflowY === 'scroll') &&
-                element.scrollHeight > element.clientHeight + 120 && element.clientHeight > 240) {
+                element.scrollHeight > element.clientHeight + 120 && element.clientHeight > 240 &&
+                (hasLikeButtons || visibleHostFrames.some(frame => element.contains(frame)))) {
               candidates.push(element);
             }
           }
@@ -517,18 +572,19 @@ internal static class LikeScript
               return true;
             }
           }
-          state.active = false;
           return false;
         })()
         """;
     }
 
-    public static string BuildReturnToTop(string sessionId)
+    public static string BuildReturnToTop(string sessionId, bool deactivate = true)
     {
         var sessionJson = JsonSerializer.Serialize(sessionId);
+        var deactivateJson = deactivate ? "true" : "false";
         return $$"""
         (() => {
           const sessionId = {{sessionJson}};
+          const deactivate = {{deactivateJson}};
           const state = globalThis.__qzaBackfillState;
           const candidates = [
             state && state.sessionId === sessionId ? state.element : null,
@@ -540,8 +596,8 @@ internal static class LikeScript
             moved = moved || element.scrollTop > 2;
             element.scrollTop = 0;
           }
-          if (state && state.sessionId === sessionId) state.active = false;
-          setTimeout(() => globalThis.__qzaFeedTracker?.reconcileDeferred?.(), 120);
+          if (deactivate && state && state.sessionId === sessionId) state.active = false;
+          if (deactivate) setTimeout(() => globalThis.__qzaFeedTracker?.reconcileDeferred?.(), 120);
           return moved;
         })()
         """;

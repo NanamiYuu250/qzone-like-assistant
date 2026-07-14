@@ -26,20 +26,13 @@ public partial class MainWindow : Window
     private AppSettings settings;
     private bool running;
     private bool scanning;
-    private int backfillScrollsRemaining;
-    private int backfillLikes;
-    private int backfillAttempts;
+    private readonly BackfillRunState backfill = new();
     private long backfillCounterRunId;
-    private bool backfillPassPending;
-    private bool backfillPassAtTop;
     private bool baselineReady;
     private bool trackersInitialized;
     private int baselineLastItemCount = -1;
     private int baselineStablePolls;
     private DateTime baselineArmNotBeforeUtc;
-    private bool topBackfillComplete;
-    private DateTime backfillDeadline;
-    private string backfillSessionId = "";
     private string trackerId = "";
     private string networkDiagnostic = "";
     private DateTime nextAutoRefreshAtUtc = DateTime.MaxValue;
@@ -188,11 +181,8 @@ public partial class MainWindow : Window
         backfillCounterRunId = startedRun.Id;
         running = true;
         processedKeys.Clear();
-        backfillScrollsRemaining = settings.BackfillOnStart ? BackfillScrollLimit : 0;
-        backfillLikes = 0;
-        backfillAttempts = 0;
-        backfillPassPending = false;
-        backfillPassAtTop = false;
+        backfill.Start(settings.BackfillOnStart, BackfillScrollLimit,
+            DateTime.UtcNow, TimeSpan.FromMinutes(3));
         BeginBaselineRearm();
         refreshInProgress = false;
         pendingRefreshContexts = [];
@@ -214,14 +204,15 @@ public partial class MainWindow : Window
         pendingRefreshContexts = [];
         nextAutoRefreshAtUtc = DateTime.MaxValue;
         if (!string.IsNullOrWhiteSpace(stoppedToken)) _ = InvalidateAutomationInPagesAsync(stoppedToken);
-        if (backfillPassPending) _ = ReturnToTopAsync();
-        backfillPassPending = false;
+        if (backfill.PassPending) _ = ReturnToTopAsync();
+        backfill.CancelPass();
         ToggleButton.Content = "开启自动点赞";
         ToggleButton.Background = new SolidColorBrush(Color.FromRgb(215, 123, 138));
         UpdateStatus("未开启", message, false);
     }
 
     private enum ScanResultState { None, Confirmed, Attempted }
+    private enum BackfillScrollResult { Scrolled, NoScrollableArea, TransientFailure }
     private readonly record struct AttemptExecution(LikeScript.StartResult? Start, LikeScript.Result? Result);
 
     private bool IsSessionActive(AutomationRun run) => running && automationSession.IsActive(run);
@@ -246,8 +237,16 @@ public partial class MainWindow : Window
                 await RefreshFeedAsync(run, force: false);
                 return;
             }
+            var isBackfillPass = backfill.PassPending;
+            if (isBackfillPass && !backfill.CanExecutePending(
+                    settings.BackfillOnStart, BackfillBudget, DateTime.UtcNow))
+            {
+                backfill.CancelPass();
+                await ReturnToTopAsync(run);
+                FinishBackfill("回扫额度或时间已用完，未再执行排队中的旧动态尝试", run);
+                return;
+            }
             if (!settings.IsActionCooldownElapsed(DateTime.UtcNow)) return;
-            var isBackfillPass = backfillPassPending;
             if (!isBackfillPass)
             {
                 await ReturnToTopAsync(run);
@@ -260,7 +259,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            var scanMode = isBackfillPass ? (backfillPassAtTop ? "historical" : "any") : "new";
+            var scanMode = isBackfillPass ? (backfill.PassAtTop ? "historical" : "any") : "new";
             var script = LikeScript.BuildStartAttempt(settings, processedKeys, viewportOnly: true,
                 scanMode, trackerId, token);
             var sawInvalidSession = false;
@@ -336,44 +335,47 @@ public partial class MainWindow : Window
 
             if (isBackfillPass)
             {
-                if (backfillPassAtTop) topBackfillComplete = true;
+                if (backfill.PassAtTop) backfill.MarkTopComplete();
                 await CompleteBackfillPassAsync(run);
                 return;
             }
 
             if (!CanContinueBackfill())
             {
-                if (backfillScrollsRemaining > 0)
+                if (backfill.ScrollsRemaining > 0)
                     FinishBackfill("回扫额度或时间已用完，继续优先监听新动态", run);
                 return;
             }
 
-            if (!topBackfillComplete)
+            if (!backfill.TopComplete)
             {
-                backfillPassAtTop = true;
-                backfillPassPending = true;
-                UpdateStatus("回扫中", $"准备处理顶部已有动态（尝试 {backfillAttempts}/{BackfillBudget}）", true);
+                backfill.BeginTopPass();
+                UpdateStatus("回扫中", $"准备处理顶部已有动态（尝试 {backfill.Attempts}/{BackfillBudget}）", true);
                 return;
             }
 
-            if (await ScrollForBackfillAsync(run))
+            var backfillScrollResult = await ScrollForBackfillAsync(run);
+            if (backfillScrollResult == BackfillScrollResult.Scrolled)
             {
                 if (!IsSessionActive(run)) return;
-                backfillScrollsRemaining -= 1;
-                backfillPassAtTop = false;
-                backfillPassPending = true;
-                UpdateStatus("回扫中", $"准备检查一屏旧动态（尝试 {backfillAttempts}/{BackfillBudget}）", true);
+                backfill.BeginScrolledPass();
+                UpdateStatus("回扫中", $"准备检查一屏旧动态（尝试 {backfill.Attempts}/{BackfillBudget}）", true);
+            }
+            else if (backfillScrollResult == BackfillScrollResult.TransientFailure && IsSessionActive(run))
+            {
+                BeginBaselineRearm();
+                UpdateStatus("回扫中", "动态页面正在替换，保留回扫进度并重新建立安全基线", true);
             }
             else if (IsSessionActive(run))
             {
-                FinishBackfill("已有动态回扫完成，继续监听新动态", run);
+                FinishBackfill("未找到可继续滚动的动态区域，已结束本轮回扫并继续监听新动态", run);
             }
         }
         catch
         {
             if (!IsSessionActive(run)) return;
             ApplyTransientCooldown();
-            if (backfillPassPending)
+            if (backfill.PassPending)
             {
                 await ReturnToTopAsync(run);
                 FinishBackfill("回扫页面发生变化，已退出回扫并继续监听新动态", run);
@@ -430,36 +432,121 @@ public partial class MainWindow : Window
             Error: "attempt_poll_timeout"));
     }
 
-    private async Task<bool> ScrollForBackfillAsync(AutomationRun run)
+    private async Task<BackfillScrollResult> ScrollForBackfillAsync(AutomationRun run)
     {
-        if (!IsSessionActive(run)) return false;
-        var script = LikeScript.BuildBackfillScroll(backfillSessionId, run.Token);
+        if (!IsSessionActive(run) || !baselineReady) return BackfillScrollResult.TransientFailure;
+        var expectedTrackerId = trackerId;
+        bool ContextStable() => IsSessionActive(run) && baselineReady && trackerId == expectedTrackerId;
+        if (!await SetBackfillActiveInPagesAsync(run, expectedTrackerId, active: true))
+            return BackfillScrollResult.TransientFailure;
+        if (!ContextStable())
+        {
+            await ClearBackfillActiveBestEffortAsync(run.Token);
+            return BackfillScrollResult.TransientFailure;
+        }
+        var frameScript = LikeScript.BuildBackfillScroll(backfill.SessionId, run.Token,
+            allowHostDocumentWithoutButtons: false);
         foreach (var frame in frames.ToArray())
         {
-            if (!IsSessionActive(run)) return false;
+            if (!ContextStable())
+            {
+                await ClearBackfillActiveBestEffortAsync(run.Token);
+                return BackfillScrollResult.TransientFailure;
+            }
             try
             {
                 if (frame.IsDestroyed() != 0) continue;
-                var result = await frame.ExecuteScriptAsync(script);
-                if (!IsSessionActive(run)) return false;
-                if (LikeScript.ParseBoolean(result)) return true;
+                var result = await frame.ExecuteScriptAsync(frameScript);
+                if (!ContextStable())
+                {
+                    await ClearBackfillActiveBestEffortAsync(run.Token);
+                    return BackfillScrollResult.TransientFailure;
+                }
+                if (LikeScript.ParseBoolean(result)) return BackfillScrollResult.Scrolled;
             }
             catch
             {
-                // QQ Space may replace the feed frame while older posts load.
+                await ClearBackfillActiveBestEffortAsync(run.Token);
+                return BackfillScrollResult.TransientFailure;
             }
         }
 
-        if (!IsSessionActive(run)) return false;
+        if (!ContextStable())
+        {
+            await ClearBackfillActiveBestEffortAsync(run.Token);
+            return BackfillScrollResult.TransientFailure;
+        }
         try
         {
-            var result = await Browser.ExecuteScriptAsync(script);
-            return IsSessionActive(run) && LikeScript.ParseBoolean(result);
+            var hostScript = LikeScript.BuildBackfillScroll(backfill.SessionId, run.Token,
+                allowHostDocumentWithoutButtons: true);
+            var result = await Browser.ExecuteScriptAsync(hostScript);
+            if (!ContextStable())
+            {
+                await ClearBackfillActiveBestEffortAsync(run.Token);
+                return BackfillScrollResult.TransientFailure;
+            }
+            if (LikeScript.ParseBoolean(result)) return BackfillScrollResult.Scrolled;
         }
         catch
         {
-            return false;
+            await ClearBackfillActiveBestEffortAsync(run.Token);
+            return BackfillScrollResult.TransientFailure;
         }
+        await ClearBackfillActiveBestEffortAsync(run.Token);
+        return ContextStable() ? BackfillScrollResult.NoScrollableArea : BackfillScrollResult.TransientFailure;
+    }
+
+    private async Task<bool> SetBackfillActiveInPagesAsync(
+        AutomationRun run, string expectedTrackerId, bool active)
+    {
+        if (!IsSessionActive(run) || !baselineReady || trackerId != expectedTrackerId ||
+            Browser.CoreWebView2 is null) return false;
+        var script = LikeScript.BuildSetBackfillActive(backfill.SessionId, run.Token, active);
+        var success = true;
+        try
+        {
+            success &= LikeScript.ParseBoolean(await Browser.ExecuteScriptAsync(script));
+        }
+        catch
+        {
+            success = false;
+        }
+
+        foreach (var frame in frames.ToArray())
+        {
+            if (!IsSessionActive(run) || !baselineReady || trackerId != expectedTrackerId)
+            {
+                success = false;
+                break;
+            }
+            try
+            {
+                if (frame.IsDestroyed() == 0 &&
+                    !LikeScript.ParseBoolean(await frame.ExecuteScriptAsync(script))) success = false;
+            }
+            catch
+            {
+                success = false;
+            }
+        }
+        var stable = IsSessionActive(run) && baselineReady && trackerId == expectedTrackerId;
+        if ((!success || !stable) && active)
+            await ClearBackfillActiveBestEffortAsync(run.Token);
+        return success && stable;
+    }
+
+    private async Task ClearBackfillActiveBestEffortAsync(string automationToken)
+    {
+        if (Browser.CoreWebView2 is null || string.IsNullOrWhiteSpace(automationToken)) return;
+        var script = LikeScript.BuildSetBackfillActive(backfill.SessionId, automationToken, active: false);
+        var tasks = new List<Task> { IgnoreScriptErrorsAsync(() => Browser.ExecuteScriptAsync(script)) };
+        foreach (var frame in frames.ToArray())
+        {
+            if (frame.IsDestroyed() == 0)
+                tasks.Add(IgnoreScriptErrorsAsync(() => frame.ExecuteScriptAsync(script)));
+        }
+        await Task.WhenAll(tasks);
     }
 
     private void BeginBaselineRearm()
@@ -471,11 +558,9 @@ public partial class MainWindow : Window
         baselineStablePolls = 0;
         baselineArmNotBeforeUtc = DateTime.UtcNow + BaselineMinimumSettleTime;
         trackerId = Guid.NewGuid().ToString("N");
-        topBackfillComplete = !settings.BackfillOnStart;
-        backfillPassPending = false;
-        backfillPassAtTop = false;
-        backfillSessionId = Guid.NewGuid().ToString("N");
-        backfillDeadline = DateTime.Now.AddMinutes(3);
+        // Page/frame replacement needs a fresh DOM tracker, but must not silently
+        // reset or terminate the startup backfill budget and deadline.
+        backfill.ResetPageContext(settings.BackfillOnStart);
     }
 
     private async Task AdvanceBaselineAsync(AutomationRun run)
@@ -549,7 +634,8 @@ public partial class MainWindow : Window
             ScheduleNextRefresh();
             UpdateStatus("运行中", refreshDiff switch
             {
-                { AnchorFound: true, NewCount: > 0 } => $"自动刷新完成，识别到 {refreshDiff.NewCount} 条新增动态",
+                { AnchorFound: true, NewCount: > 0 } =>
+                    $"自动刷新完成，识别到 {refreshDiff.NewCount} 条新增候选；已赞、过滤或暂不可见的内容会跳过",
                 { AnchorFound: true } => "自动刷新完成，暂未发现新增动态",
                 _ => "自动刷新完成，但未找到旧锚点；本轮内容已按历史动态保护"
             }, true);
@@ -663,7 +749,7 @@ public partial class MainWindow : Window
     }
 
     private bool ShouldAutoRefresh() => settings.AutoRefreshEnabled && baselineReady &&
-        !refreshInProgress && !backfillPassPending && !CanContinueBackfill() &&
+        !refreshInProgress && !backfill.PassPending && !CanContinueBackfill() &&
         DateTime.UtcNow >= nextAutoRefreshAtUtc;
 
     private void ScheduleNextRefresh()
@@ -695,9 +781,10 @@ public partial class MainWindow : Window
             .Select(context => new RefreshContextCheckpoint(context.IsMain, context.Keys))
             .ToArray();
         refreshInProgress = true;
-        backfillScrollsRemaining = 0;
-        backfillPassPending = false;
-        backfillPassAtTop = false;
+        // A manual refresh may happen while startup backfill is still active.
+        // Cancel only the in-flight page pass; preserve the remaining budget so
+        // the newly loaded page can resume historical scanning after re-arming.
+        backfill.CancelPass();
         UpdateStatus("正在刷新", checkpointKeyCount > 0
             ? $"已保存 {checkpointKeyCount} 个顶部锚点，正在重新加载 QQ 空间"
             : "未找到动态锚点，正在执行安全刷新", true);
@@ -812,8 +899,10 @@ public partial class MainWindow : Window
     private async Task ReturnToTopAsync(AutomationRun? requiredRun = null)
     {
         bool Allowed() => requiredRun is null || IsSessionActive(requiredRun.Value);
-        if (Browser.CoreWebView2 is null || string.IsNullOrWhiteSpace(backfillSessionId) || !Allowed()) return;
-        var script = LikeScript.BuildReturnToTop(backfillSessionId);
+        if (Browser.CoreWebView2 is null || string.IsNullOrWhiteSpace(backfill.SessionId) || !Allowed()) return;
+        var activeRun = requiredRun ?? automationSession.Current;
+        var canBroadcast = IsSessionActive(activeRun);
+        var script = LikeScript.BuildReturnToTop(backfill.SessionId, deactivate: !canBroadcast);
         foreach (var frame in frames.ToArray())
         {
             if (!Allowed()) return;
@@ -836,6 +925,19 @@ public partial class MainWindow : Window
         {
             // Keep the normal scan timer alive if the page is navigating.
         }
+        if (canBroadcast)
+            await ClearBackfillActiveBestEffortAsync(activeRun.Token);
+
+        // A frame may have been replaced during either phase. Always perform a
+        // final local deactivate+top fallback in every currently surviving context.
+        var fallback = LikeScript.BuildReturnToTop(backfill.SessionId, deactivate: true);
+        var fallbackTasks = new List<Task> { IgnoreScriptErrorsAsync(() => Browser.ExecuteScriptAsync(fallback)) };
+        foreach (var frame in frames.ToArray())
+        {
+            if (frame.IsDestroyed() == 0)
+                fallbackTasks.Add(IgnoreScriptErrorsAsync(() => frame.ExecuteScriptAsync(fallback)));
+        }
+        await Task.WhenAll(fallbackTasks);
     }
 
     private async Task InvalidateAutomationInPagesAsync(string stoppedToken)
@@ -869,8 +971,7 @@ public partial class MainWindow : Window
     private async Task CompleteBackfillPassAsync(AutomationRun run)
     {
         if (!IsSessionActive(run)) return;
-        backfillPassPending = false;
-        backfillPassAtTop = false;
+        backfill.CancelPass();
         await ReturnToTopAsync(run);
         if (!IsSessionActive(run)) return;
         if (!CanContinueBackfill()) FinishBackfill("回扫已到限制，继续优先监听新动态", run);
@@ -880,14 +981,13 @@ public partial class MainWindow : Window
     private int BackfillBudget => Math.Min(settings.BackfillLikeLimit,
         Math.Max(0, (int)Math.Floor(settings.DailyLimit * 0.30)));
 
-    private bool CanContinueBackfill() => settings.BackfillOnStart &&
-        backfillScrollsRemaining > 0 && backfillAttempts < BackfillBudget && DateTime.Now < backfillDeadline;
+    private bool CanContinueBackfill() =>
+        backfill.CanContinue(settings.BackfillOnStart, BackfillBudget, DateTime.UtcNow);
 
     private void FinishBackfill(string message, AutomationRun run)
     {
         if (!IsSessionActive(run)) return;
-        backfillScrollsRemaining = 0;
-        backfillPassPending = false;
+        backfill.Finish();
         UpdateStatus("运行中", message, true);
     }
 
@@ -904,7 +1004,7 @@ public partial class MainWindow : Window
 
         AddProcessedKey(result.Key);
         settings.TodayCount += 1;
-        if (fromBackfill) backfillLikes += 1;
+        if (fromBackfill) backfill.RegisterSuccess();
         settings.Save(SettingsPath);
         UpdateStatus(fromBackfill ? "回扫中" : "运行中",
             $"已点赞{(fromBackfill ? "旧动态" : "新动态")}：{result.Preview ?? "一条好友动态"}", true);
@@ -914,7 +1014,7 @@ public partial class MainWindow : Window
     private void RegisterAttemptStarted(string attemptId, bool fromBackfill, AutomationRun run)
     {
         if (!attemptQuotaLedger.Register(attemptId, settings)) return;
-        if (fromBackfill && backfillCounterRunId == run.Id) backfillAttempts += 1;
+        if (fromBackfill && backfillCounterRunId == run.Id) backfill.RegisterAttempt();
         settings.Save(SettingsPath);
         if (IsSessionActive(run))
             UpdateStatus(fromBackfill ? "回扫中" : "运行中", "点赞已发出，正在确认页面状态", true);

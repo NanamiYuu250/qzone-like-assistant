@@ -30,7 +30,7 @@ internal static class Program
             try
             {
                 await RunIntegrationTestAsync(browser);
-                Console.WriteLine("WebView2 integration test passed: synchronous attempt, polling, tracker-missing, backfill reconciliation, explicit host baseline arm, atomic refresh-anchor diff and arm.");
+                Console.WriteLine("WebView2 integration test passed: synchronous attempt, polling, tracker-missing, cross-context host backfill scrolling, backfill reconciliation, explicit host baseline arm, atomic refresh-anchor diff and arm.");
                 exitCode = 0;
             }
             catch (Exception exception)
@@ -79,9 +79,19 @@ internal static class Program
 
         const string trackerId = "integration-tracker";
         const string token = "integration-token";
+        await browser.ExecuteScriptAsync("""
+            globalThis.__qzaBackfillState = {
+              sessionId: 'stale-session', automationToken: 'old-token',
+              offset: 900, element: document.scrollingElement, active: true
+            };
+            true;
+            """);
         var trackerCount = LikeScript.ParseInteger(await browser.ExecuteScriptAsync(
             LikeScript.BuildInitializeTracker(trackerId, token)));
         Require(trackerCount == 1, $"跟踪器应登记 1 条初始动态，实际为 {trackerCount}");
+        Require(LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+                "globalThis.__qzaBackfillState === null")),
+            "新运行初始化 tracker 时必须清除旧 token 遗留的 active 回扫状态");
         Require(LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
             LikeScript.BuildArmTracker(trackerId, token))),
             "宿主显式确认初始历史基线后应能武装跟踪器");
@@ -138,8 +148,10 @@ internal static class Program
         await browser.ExecuteScriptAsync(LikeScript.BuildReturnToTop("backfill-test"));
         await Task.Delay(320);
         Require(LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
-            "globalThis.__qzaFeedTracker.newKeys.has('new-during-backfill')")),
-            "返回顶部后，顶部待判定动态应恢复为新动态");
+            "globalThis.__qzaFeedTracker.knownKeys.has('new-during-backfill')")) &&
+            !LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+                "globalThis.__qzaFeedTracker.newKeys.has('new-during-backfill')")),
+            "回扫期间首次出现的条目回顶后必须按历史项保护，不能仅凭顶部位置判为新动态");
 
         await browser.ExecuteScriptAsync("document.body.innerHTML = ''");
         const string bootstrapTrackerId = "empty-frame-bootstrap";
@@ -267,6 +279,130 @@ internal static class Program
         Require(LikeScript.ParseStringArray(await browser.ExecuteScriptAsync(
                 LikeScript.BuildCaptureRefreshKeys())).Count == 0,
             "没有 data-tid/data-feedskey/data-unikey/id 时不得用正文生成刷新锚点");
+
+        await browser.ExecuteScriptAsync("""
+            document.body.innerHTML = `<div style="height:1800px">无 iframe 的普通长页面</div>`;
+            document.scrollingElement.scrollTop = 0;
+            globalThis.__qzaAutomationSession = 'integration-token';
+            true;
+            """);
+        Require(LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+                LikeScript.BuildSetBackfillActive("no-frame-scroll-test", token, true))),
+            "宿主滚动测试应先显式进入回扫状态");
+        Require(!LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+                LikeScript.BuildBackfillScroll("no-frame-scroll-test", token, true))),
+            "没有可见 iframe 和点赞按钮的宿主页面不得滚动 document root");
+
+        var frameReady = new TaskCompletionSource<CoreWebView2Frame>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnFrameCreated(object? sender, CoreWebView2FrameCreatedEventArgs args)
+        {
+            if (!string.Equals(args.Frame.Name, "feed-frame", StringComparison.Ordinal)) return;
+            args.Frame.NavigationCompleted += async (_, navigationArgs) =>
+            {
+                if (!navigationArgs.IsSuccess) return;
+                for (var poll = 0; poll < 40 && !frameReady.Task.IsCompleted; poll += 1)
+                {
+                    try
+                    {
+                        if (LikeScript.ParseBoolean(await args.Frame.ExecuteScriptAsync(
+                                "Boolean(document.querySelector('[data-tid=\"frame-old-a\"]'))")))
+                        {
+                            frameReady.TrySetResult(args.Frame);
+                            return;
+                        }
+                    }
+                    catch
+                    {
+                        // about:blank may be completing while srcdoc is replacing it.
+                    }
+                    await Task.Delay(50);
+                }
+            };
+        }
+        browser.CoreWebView2.FrameCreated += OnFrameCreated;
+        await browser.ExecuteScriptAsync("""
+            document.body.innerHTML = `
+              <div id="wrong-scroll" style="width:100%;height:420px;overflow-y:auto">
+                <div style="height:1800px">
+                  <iframe name="hidden-unrelated" title="隐藏的无关子页面" style="display:none"></iframe>
+                </div>
+              </div>
+              <iframe id="feed-frame" name="feed-frame" title="动态内容子页面"
+                style="display:block;width:100%;height:400px"></iframe>
+              <div style="height:1800px">外层页面滚动区</div>`;
+            const feedFrame = document.getElementById('feed-frame');
+            feedFrame.srcdoc = `<!doctype html><html><body>
+              <article class="feed_item" data-tid="frame-old-a">
+                <p>iframe 初始历史动态</p><button title="赞" aria-pressed="false">赞</button>
+              </article></body></html>`;
+            window.addEventListener('scroll', () => {
+              const doc = feedFrame.contentDocument;
+              if (!doc || doc.querySelector('[data-tid="host-loaded-history"]')) return;
+              doc.body.insertAdjacentHTML('afterbegin', `
+                <article class="feed_item" data-tid="host-loaded-history">
+                  <p>宿主滚动后加载的历史动态</p><button title="赞" aria-pressed="false">赞</button>
+                </article>`);
+            }, { once: true });
+            document.scrollingElement.scrollTop = 0;
+            globalThis.__qzaAutomationSession = 'integration-token';
+            true;
+            """);
+        var feedFrame = await frameReady.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        browser.CoreWebView2.FrameCreated -= OnFrameCreated;
+        const string crossContextTrackerId = "cross-context-backfill";
+        var crossContextInitialCount = LikeScript.ParseInteger(await feedFrame.ExecuteScriptAsync(
+            LikeScript.BuildInitializeTracker(crossContextTrackerId, token)));
+        Require(crossContextInitialCount == 1,
+            $"目标 feed iframe 应含 1 条初始历史动态，实际为 {crossContextInitialCount}");
+        Require(LikeScript.ParseBoolean(await feedFrame.ExecuteScriptAsync(
+                LikeScript.BuildArmTracker(crossContextTrackerId, token))),
+            "feed iframe 的初始历史基线应能武装");
+        Require(LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+                LikeScript.BuildSetBackfillActive("host-scroll-test", token, true))) &&
+            LikeScript.ParseBoolean(await feedFrame.ExecuteScriptAsync(
+                LikeScript.BuildSetBackfillActive("host-scroll-test", token, true))),
+            "实际宿主滚动前，host 与 feed iframe 必须同时进入回扫状态");
+        Require(!LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+                LikeScript.BuildBackfillScroll("host-scroll-test", token, false))),
+            "普通 frame 没有点赞按钮时不得擅自滚动");
+        Require(LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+                LikeScript.BuildBackfillScroll("host-scroll-test", token, true))),
+            "点赞按钮位于子页面时，宿主页面仍应能推进外层动态滚动区");
+        Require(LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+                "document.scrollingElement.scrollTop > 0")),
+            "宿主回扫脚本必须实际推进外层页面滚动位置");
+        Require(LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+                "document.getElementById('wrong-scroll').scrollTop === 0")),
+            "含隐藏 iframe 的无关大滚动容器不得抢占可见 feed iframe 的宿主滚动");
+        await Task.Delay(250);
+        var crossContextState = await feedFrame.ExecuteScriptAsync("""
+            (() => ({
+              active: globalThis.__qzaBackfillState?.active === true,
+              present: Boolean(document.querySelector('[data-tid="host-loaded-history"]')),
+              deferred: globalThis.__qzaFeedTracker.deferredKeys.has('host-loaded-history'),
+              known: globalThis.__qzaFeedTracker.knownKeys.has('host-loaded-history'),
+              isNew: globalThis.__qzaFeedTracker.newKeys.has('host-loaded-history')
+            }))()
+            """);
+        Require(crossContextState.Contains("\"active\":true", StringComparison.Ordinal) &&
+                crossContextState.Contains("\"present\":true", StringComparison.Ordinal) &&
+                crossContextState.Contains("\"deferred\":true", StringComparison.Ordinal) &&
+                crossContextState.Contains("\"isNew\":false", StringComparison.Ordinal),
+            $"宿主滚动触发的 iframe 历史节点必须在回扫期间延迟判定，不能进入 newKeys：{crossContextState}");
+        await feedFrame.ExecuteScriptAsync(LikeScript.BuildReturnToTop("host-scroll-test", deactivate: false));
+        await browser.ExecuteScriptAsync(LikeScript.BuildReturnToTop("host-scroll-test", deactivate: false));
+        Require(LikeScript.ParseBoolean(await feedFrame.ExecuteScriptAsync(
+                LikeScript.BuildSetBackfillActive("host-scroll-test", token, false))) &&
+            LikeScript.ParseBoolean(await browser.ExecuteScriptAsync(
+                LikeScript.BuildSetBackfillActive("host-scroll-test", token, false))),
+            "回顶后应统一退出所有上下文的回扫状态");
+        await Task.Delay(320);
+        Require(LikeScript.ParseBoolean(await feedFrame.ExecuteScriptAsync(
+                "globalThis.__qzaFeedTracker.knownKeys.has('host-loaded-history')")) &&
+            !LikeScript.ParseBoolean(await feedFrame.ExecuteScriptAsync(
+                "globalThis.__qzaFeedTracker.newKeys.has('host-loaded-history')")),
+            "回顶后的延迟项只能登记为 known 历史项，不能重新判成新动态");
 
         await browser.ExecuteScriptAsync("globalThis.__qzaFeedTracker = null");
         var missing = LikeScript.ParseStartResult(await browser.ExecuteScriptAsync(
