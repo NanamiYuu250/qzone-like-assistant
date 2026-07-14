@@ -1,0 +1,12 @@
+node_modules/
+release/
+bin/
+obj/
+publish/
+TestResults/
+.vs/
+*.user
+*.suo
+*.zip
+*.log
+.DS_Store
