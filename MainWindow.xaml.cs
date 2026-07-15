@@ -42,7 +42,8 @@ public partial class MainWindow : Window
     private sealed record RefreshExecutionContext(
         bool IsMain,
         CoreWebView2Frame? Frame,
-        IReadOnlyList<string> Keys);
+        IReadOnlyList<string> Keys,
+        string Identity);
 
     private string SettingsPath => Path.Combine(appDataDirectory, "settings.json");
     private string BrowserDataPath => Path.Combine(appDataDirectory, "WebView2");
@@ -778,7 +779,7 @@ public partial class MainWindow : Window
         }
 
         pendingRefreshContexts = checkpointContexts
-            .Select(context => new RefreshContextCheckpoint(context.IsMain, context.Keys))
+            .Select(context => new RefreshContextCheckpoint(context.IsMain, context.Keys, context.Identity))
             .ToArray();
         refreshInProgress = true;
         // A manual refresh may happen while startup backfill is still active.
@@ -820,7 +821,8 @@ public partial class MainWindow : Window
             contexts.Add(new RefreshExecutionContext(
                 IsMain: true,
                 Frame: null,
-                Keys: ParseKeys(await Browser.ExecuteScriptAsync(script))));
+                Keys: ParseKeys(await Browser.ExecuteScriptAsync(script)),
+                Identity: "main"));
         }
         catch
         {
@@ -837,7 +839,8 @@ public partial class MainWindow : Window
                     contexts.Add(new RefreshExecutionContext(
                         IsMain: false,
                         Frame: frame,
-                        Keys: ParseKeys(await frame.ExecuteScriptAsync(script))));
+                        Keys: ParseKeys(await frame.ExecuteScriptAsync(script)),
+                        Identity: frame.Name?.Trim() ?? ""));
                 }
             }
             catch
@@ -854,7 +857,7 @@ public partial class MainWindow : Window
         var currentContexts = await CaptureRefreshContextsAsync(run);
         if (!IsSessionActive(run) || trackerId != expectedTrackerId || currentContexts.Count == 0) return null;
         var currentCheckpoints = currentContexts
-            .Select(context => new RefreshContextCheckpoint(context.IsMain, context.Keys))
+            .Select(context => new RefreshContextCheckpoint(context.IsMain, context.Keys, context.Identity))
             .ToArray();
         var matches = RefreshContextMatcher.Match(pendingRefreshContexts, currentCheckpoints);
         var anchorFound = false;

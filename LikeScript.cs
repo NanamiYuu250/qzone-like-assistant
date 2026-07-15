@@ -63,9 +63,9 @@ internal static class LikeScript
             '[data-op="like"]', '[data-action="like"]', 'a[title="赞"]',
             'button[aria-label="赞"]', 'button[title="赞"]'
           ].join(',');
-          const itemSelector = [
-            '[data-tid]', '[data-feedskey]', '[data-unikey]', '.f-single',
-            '.feed_item', '.feed-item', '.qz-feed', 'article'
+          const feedSelector = ['.f-single', '.feed_item', '.feed-item', '.qz-feed', 'article'].join(',');
+          const identitySelector = [
+            '[data-tid]', '[data-feedskey]', '[data-unikey]', '[data-curkey]', '[data-fid]'
           ].join(',');
           const normalize = value => String(value || '').trim().toLocaleLowerCase('zh-CN');
           const include = config.includeKeywords.map(normalize);
@@ -91,19 +91,35 @@ internal static class LikeScript
             if (exclude.some(keyword => value.includes(keyword))) return false;
             return include.length === 0 || include.some(keyword => value.includes(keyword));
           };
-          const keyFor = item => item.getAttribute('data-tid') ||
-            item.getAttribute('data-feedskey') || item.getAttribute('data-unikey') ||
-            item.id || normalize(item.innerText).slice(0, 160);
+          const itemFor = button => button.closest(feedSelector) || button.closest(identitySelector);
+          const identityFor = button => button.closest(identitySelector);
+          const readAttribute = (elements, name) => {
+            for (const element of elements) {
+              const value = element?.getAttribute?.(name)?.trim();
+              if (value) return value;
+            }
+            return '';
+          };
+          const stableKeyFor = (item, button) => {
+            const elements = [item, identityFor(button), button];
+            for (const name of ['data-tid', 'data-feedskey', 'data-unikey', 'data-curkey', 'data-fid']) {
+              const value = readAttribute(elements, name);
+              if (value) return `${name}:${value}`;
+            }
+            return item?.id?.trim() ? `id:${item.id.trim()}` : '';
+          };
           const attempts = globalThis.__qzaLikeAttempts ||= new Map();
           while (attempts.size > 100) attempts.delete(attempts.keys().next().value);
 
           for (const button of document.querySelectorAll(buttonSelector)) {
             if (!visible(button) || liked(button)) continue;
-            const item = button.closest(itemSelector);
+            const item = itemFor(button);
             if (!item || !visible(item) || (config.viewportOnly && !inViewport(item))) continue;
             const text = item.innerText || item.textContent || '';
             if (!matches(text)) continue;
-            const key = keyFor(item);
+            const key = typeof tracker.keyFor === 'function'
+              ? tracker.keyFor(item, button)
+              : stableKeyFor(item, button);
             if (!key || processed.has(key)) continue;
 
             const isNew = tracker.newKeys.has(key);
@@ -205,14 +221,49 @@ internal static class LikeScript
             '[data-op="like"]', '[data-action="like"]', 'a[title="赞"]',
             'button[aria-label="赞"]', 'button[title="赞"]'
           ].join(',');
-          const itemSelector = [
-            '[data-tid]', '[data-feedskey]', '[data-unikey]', '.f-single',
-            '.feed_item', '.feed-item', '.qz-feed', 'article'
+          const feedSelector = ['.f-single', '.feed_item', '.feed-item', '.qz-feed', 'article'].join(',');
+          const identitySelector = [
+            '[data-tid]', '[data-feedskey]', '[data-unikey]', '[data-curkey]', '[data-fid]'
           ].join(',');
           const normalize = value => String(value || '').trim().toLocaleLowerCase('zh-CN');
-          const keyFor = item => item.getAttribute('data-tid') ||
-            item.getAttribute('data-feedskey') || item.getAttribute('data-unikey') ||
-            item.id || normalize(item.innerText).slice(0, 160);
+          const itemFor = button => button.closest(feedSelector) || button.closest(identitySelector);
+          const identityFor = button => button.closest(identitySelector);
+          const readAttribute = (elements, name) => {
+            for (const element of elements) {
+              const value = element?.getAttribute?.(name)?.trim();
+              if (value) return value;
+            }
+            return '';
+          };
+          const stableKeyFor = (item, button) => {
+            const elements = [item, identityFor(button), button];
+            for (const name of ['data-tid', 'data-feedskey', 'data-unikey', 'data-curkey', 'data-fid']) {
+              const value = readAttribute(elements, name);
+              if (value) return `${name}:${value}`;
+            }
+            return item?.id?.trim() ? `id:${item.id.trim()}` : '';
+          };
+          const resolvedKeys = new WeakMap();
+          let fallbackSequence = 0;
+          const createResolvedKey = (stable, suppressRefreshPromotion = false) => ({
+            stable,
+            key: stable || `qza-dom:${trackerId}:${++fallbackSequence}`,
+            suppressRefreshPromotion
+          });
+          const keyFor = (item, button) => {
+            const existing = resolvedKeys.get(item);
+            if (existing) return existing.key;
+            const stable = stableKeyFor(item, button);
+            const resolved = createResolvedKey(stable);
+            resolvedKeys.set(item, resolved);
+            return resolved.key;
+          };
+          const canPromoteForRefresh = (item, button) => {
+            const resolved = resolvedKeys.get(item);
+            const liveStable = stableKeyFor(item, button);
+            return Boolean(resolved && liveStable && resolved.key === liveStable &&
+              resolved.stable === liveStable && !resolved.suppressRefreshPromotion);
+          };
           const state = {
             trackerId,
             automationToken,
@@ -223,6 +274,8 @@ internal static class LikeScript
             bootstrapComplete: false,
             deferredKeys: new Map(),
             reconcileDeferred: null,
+            keyFor,
+            canPromoteForRefresh,
             observer: null
           };
 
@@ -259,22 +312,55 @@ internal static class LikeScript
             return !document.scrollingElement || document.scrollingElement.scrollTop < 160;
           };
 
-          const registerButtons = (root, allowNew, deferDuringBackfill = false) => {
-            if (!root) return;
+          const buttonsFor = root => {
             const buttons = [];
+            if (!root) return buttons;
             if (root.nodeType === Node.ELEMENT_NODE && root.matches(buttonSelector)) buttons.push(root);
             if (root.querySelectorAll) buttons.push(...root.querySelectorAll(buttonSelector));
-            for (const button of buttons) {
-              const item = button.closest(itemSelector);
+            return buttons;
+          };
+
+          const revokeNew = key => {
+            if (!key) return;
+            state.newKeys.delete(key);
+            state.newOrder = state.newOrder.filter(candidate => candidate !== key);
+          };
+
+          const reconcileIdentity = root => {
+            for (const button of buttonsFor(root)) {
+              const item = itemFor(button);
               if (!item) continue;
-              const key = keyFor(item);
+              const liveStable = stableKeyFor(item, button);
+              const cached = resolvedKeys.get(item);
+              if (cached && cached.stable === liveStable) {
+                remember(cached.key, false);
+                continue;
+              }
+              if (cached) {
+                revokeNew(cached.key);
+                state.deferredKeys.delete(cached.key);
+              }
+              revokeNew(liveStable);
+              const resolved = createResolvedKey(liveStable, true);
+              resolvedKeys.set(item, resolved);
+              remember(resolved.key, false);
+            }
+          };
+
+          const registerButtons = (root, allowNew, deferDuringBackfill = false) => {
+            for (const button of buttonsFor(root)) {
+              const item = itemFor(button);
+              if (!item) continue;
+              const key = keyFor(item, button);
               const backfilling = globalThis.__qzaBackfillState?.active === true;
               if ((deferDuringBackfill || backfilling) && key && !state.knownKeys.has(key)) {
                 state.deferredKeys.set(key, { createdAt: Date.now(), suppressNew: true });
                 if (!backfilling) setTimeout(() => state.reconcileDeferred?.(), 0);
                 continue;
               }
-              remember(key, state.bootstrapComplete && allowNew && !backfilling && isNearTop(item));
+              const hasStableIdentity = Boolean(stableKeyFor(item, button));
+              remember(key, state.bootstrapComplete && allowNew && hasStableIdentity &&
+                !backfilling && isNearTop(item));
             }
           };
 
@@ -282,9 +368,9 @@ internal static class LikeScript
             if (globalThis.__qzaBackfillState?.active === true || state.deferredKeys.size === 0) return;
             const visibleItems = new Map();
             for (const button of document.querySelectorAll(buttonSelector)) {
-              const item = button.closest(itemSelector);
+              const item = itemFor(button);
               if (!item) continue;
-              const key = keyFor(item);
+              const key = keyFor(item, button);
               if (key) visibleItems.set(key, item);
             }
             const now = Date.now();
@@ -307,21 +393,35 @@ internal static class LikeScript
           registerButtons(document, false);
           state.observer = new MutationObserver(mutations => {
             const wasBackfilling = globalThis.__qzaBackfillState?.active === true;
-            const allowNew = globalThis.__qzaAutomationSession === automationToken && !wasBackfilling;
-            const roots = [];
+            const wasArmed = state.bootstrapComplete === true;
+            const allowNew = globalThis.__qzaAutomationSession === automationToken &&
+              wasArmed && !wasBackfilling;
+            const addedRoots = new Set();
+            const attributeRoots = new Set();
             for (const mutation of mutations) {
+              if (mutation.type === 'attributes' && mutation.target.nodeType === Node.ELEMENT_NODE) {
+                attributeRoots.add(mutation.target);
+              }
               for (const node of mutation.addedNodes) {
-                if (node.nodeType === Node.ELEMENT_NODE) roots.push(node);
+                if (node.nodeType === Node.ELEMENT_NODE) addedRoots.add(node);
               }
             }
-            if (roots.length === 0) return;
+            if (addedRoots.size === 0 && attributeRoots.size === 0) return;
+            // Revoke stale new eligibility synchronously with the observer callback.
+            // A virtualized feed may reuse one DOM node for a different post.
+            for (const root of attributeRoots) reconcileIdentity(root);
             setTimeout(() => {
               if (globalThis.__qzaAutomationSession !== automationToken) return;
-              for (const root of roots) registerButtons(root, allowNew, wasBackfilling);
+              for (const root of addedRoots) registerButtons(root, allowNew, wasBackfilling);
             }, 80);
           });
           if (document.documentElement) {
-            state.observer.observe(document.documentElement, { childList: true, subtree: true });
+            state.observer.observe(document.documentElement, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+              attributeFilter: ['data-tid', 'data-feedskey', 'data-unikey', 'data-curkey', 'data-fid', 'id']
+            });
           }
           globalThis.__qzaFeedTracker = state;
           return state.knownKeys.size;
@@ -355,18 +455,32 @@ internal static class LikeScript
             '[data-op="like"]', '[data-action="like"]', 'a[title="赞"]',
             'button[aria-label="赞"]', 'button[title="赞"]'
           ].join(',');
-          const itemSelector = [
-            '[data-tid]', '[data-feedskey]', '[data-unikey]', '.f-single',
-            '.feed_item', '.feed-item', '.qz-feed', 'article'
+          const feedSelector = ['.f-single', '.feed_item', '.feed-item', '.qz-feed', 'article'].join(',');
+          const identitySelector = [
+            '[data-tid]', '[data-feedskey]', '[data-unikey]', '[data-curkey]', '[data-fid]'
           ].join(',');
-          const keyFor = item => item.getAttribute('data-tid') ||
-            item.getAttribute('data-feedskey') || item.getAttribute('data-unikey') ||
-            item.id || null;
+          const itemFor = button => button.closest(feedSelector) || button.closest(identitySelector);
+          const identityFor = button => button.closest(identitySelector);
+          const readAttribute = (elements, name) => {
+            for (const element of elements) {
+              const value = element?.getAttribute?.(name)?.trim();
+              if (value) return value;
+            }
+            return '';
+          };
+          const keyFor = (item, button) => {
+            const elements = [item, identityFor(button), button];
+            for (const name of ['data-tid', 'data-feedskey', 'data-unikey', 'data-curkey', 'data-fid']) {
+              const value = readAttribute(elements, name);
+              if (value) return `${name}:${value}`;
+            }
+            return item?.id?.trim() ? `id:${item.id.trim()}` : '';
+          };
           const keys = [];
           const seen = new Set();
           for (const button of document.querySelectorAll(buttonSelector)) {
-            const item = button.closest(itemSelector);
-            const key = item && keyFor(item);
+            const item = itemFor(button);
+            const key = item && keyFor(item, button);
             if (!key || seen.has(key)) continue;
             seen.add(key);
             keys.push(key);
@@ -402,32 +516,53 @@ internal static class LikeScript
             '[data-op="like"]', '[data-action="like"]', 'a[title="赞"]',
             'button[aria-label="赞"]', 'button[title="赞"]'
           ].join(',');
-          const itemSelector = [
-            '[data-tid]', '[data-feedskey]', '[data-unikey]', '.f-single',
-            '.feed_item', '.feed-item', '.qz-feed', 'article'
+          const feedSelector = ['.f-single', '.feed_item', '.feed-item', '.qz-feed', 'article'].join(',');
+          const identitySelector = [
+            '[data-tid]', '[data-feedskey]', '[data-unikey]', '[data-curkey]', '[data-fid]'
           ].join(',');
-          const keyFor = item => item.getAttribute('data-tid') ||
-            item.getAttribute('data-feedskey') || item.getAttribute('data-unikey') ||
-            item.id || null;
+          const itemFor = button => button.closest(feedSelector) || button.closest(identitySelector);
+          const identityFor = button => button.closest(identitySelector);
+          const readAttribute = (elements, name) => {
+            for (const element of elements) {
+              const value = element?.getAttribute?.(name)?.trim();
+              if (value) return value;
+            }
+            return '';
+          };
+          const stableKeyFor = (item, button) => {
+            const elements = [item, identityFor(button), button];
+            for (const name of ['data-tid', 'data-feedskey', 'data-unikey', 'data-curkey', 'data-fid']) {
+              const value = readAttribute(elements, name);
+              if (value) return `${name}:${value}`;
+            }
+            return item?.id?.trim() ? `id:${item.id.trim()}` : '';
+          };
           const oldKeys = new Set(config.previousTopKeys);
-          const currentKeys = [];
+          const currentEntries = [];
           const seen = new Set();
           for (const button of document.querySelectorAll(buttonSelector)) {
-            const item = button.closest(itemSelector);
-            const key = item && keyFor(item);
-            if (!key || seen.has(key)) continue;
-            seen.add(key);
-            currentKeys.push(key);
-            if (currentKeys.length >= 200) break;
+            const item = itemFor(button);
+            const stableKey = item && stableKeyFor(item, button);
+            if (!stableKey || seen.has(stableKey)) continue;
+            seen.add(stableKey);
+            const trackerKey = typeof tracker.keyFor === 'function'
+              ? tracker.keyFor(item, button)
+              : stableKey;
+            const promotionEligible = typeof tracker.canPromoteForRefresh === 'function' &&
+              tracker.canPromoteForRefresh(item, button) === true;
+            currentEntries.push({ stableKey, trackerKey, promotionEligible });
+            if (currentEntries.length >= 200) break;
           }
-          const anchorIndex = currentKeys.findIndex(key => oldKeys.has(key));
+          const anchorIndex = currentEntries.findIndex(entry => oldKeys.has(entry.stableKey));
           if (anchorIndex < 0) {
             tracker.bootstrapComplete = true;
             tracker.reconcileDeferred?.();
             return { valid: true, anchorFound: false, newCount: 0, armed: true };
           }
           let newCount = 0;
-          for (const key of currentKeys.slice(0, Math.min(anchorIndex, 20))) {
+          for (const entry of currentEntries.slice(0, Math.min(anchorIndex, 20))) {
+            if (entry.trackerKey !== entry.stableKey || !entry.promotionEligible) continue;
+            const key = entry.trackerKey;
             if (tracker.newKeys.has(key)) continue;
             tracker.newKeys.add(key);
             tracker.newOrder.push(key);
@@ -608,6 +743,18 @@ internal static class LikeScript
 
     public static int ParseInteger(string json) =>
         int.TryParse(json, out var value) ? value : 0;
+
+    public static string ParseString(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<string>(json) ?? "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
 
     public static IReadOnlyList<string> ParseStringArray(string json)
     {

@@ -126,6 +126,19 @@ Require(RefreshContextMatcher.Match(
         [new(false, ["only-one"])]).Count == 0,
     "只有一个共同锚点时应保守地视为上下文不明确");
 Require(RefreshContextMatcher.Match(
+        [new(false, ["only-one"], "feed-frame")],
+        [new(false, ["new-item", "only-one"], "feed-frame")]) is var singleAnchorMatches &&
+        singleAnchorMatches.Count == 1 && singleAnchorMatches[0] == 0,
+    "frame 身份稳定且唯一时可安全使用单个刷新锚点");
+Require(RefreshContextMatcher.Match(
+        [new(false, ["only-one"], "feed-frame"), new(false, ["other"], "feed-frame")],
+        [new(false, ["new-item", "only-one"], "feed-frame")]).Count == 0,
+    "frame 身份重复时不得放宽双锚点安全规则");
+Require(RefreshContextMatcher.Match(
+        [new(false, ["only-one"], "old-frame")],
+        [new(false, ["new-item", "only-one"], "replacement-frame")]).Count == 0,
+    "frame 身份变化时不得使用单个刷新锚点");
+Require(RefreshContextMatcher.Match(
         [new(false, ["same-a", "same-b"]), new(false, ["same-a", "same-b"])],
         [new(false, ["same-a", "same-b"])]).Count == 0,
     "多个 frame 都可匹配时不得选取歧义锚点");
@@ -222,11 +235,13 @@ static async Task CheckRefreshDiffBehaviorAsync()
     using var captureJson = JsonDocument.Parse(captureOutput);
     var captured = captureJson.RootElement.GetProperty("result").EnumerateArray()
         .Select(element => element.GetString()).ToArray();
-    Require(captured.SequenceEqual(["old-a", "old-b"]), "刷新前必须按页面顺序保存顶部锚点");
+    Require(captured.SequenceEqual(["data-tid:old-a", "data-tid:old-b"]),
+        "刷新前必须按页面顺序保存带属性命名空间的顶部锚点");
 
     var applyOutput = await RunJavaScriptAsync(BuildDomHarness(
         ["new-c", "old-a", "old-b"], trackerId, token,
-        LikeScript.BuildApplyAndArmRefreshKeys(["old-a", "old-b"], trackerId, token)));
+        LikeScript.BuildApplyAndArmRefreshKeys(
+            ["data-tid:old-a", "data-tid:old-b"], trackerId, token)));
     using var applyJson = JsonDocument.Parse(applyOutput);
     var result = applyJson.RootElement.GetProperty("result");
     Require(result.GetProperty("valid").GetBoolean() &&
@@ -237,11 +252,13 @@ static async Task CheckRefreshDiffBehaviorAsync()
         "刷新后必须只识别旧锚点之前的新增动态");
     var newKeys = applyJson.RootElement.GetProperty("newKeys").EnumerateArray()
         .Select(element => element.GetString()).ToArray();
-    Require(newKeys.SequenceEqual(["new-c"]), "旧锚点及其后的历史动态不得进入新动态队列");
+    Require(newKeys.SequenceEqual(["data-tid:new-c"]),
+        "旧锚点及其后的历史动态不得进入新动态队列");
 
     var missingOutput = await RunJavaScriptAsync(BuildDomHarness(
         ["unrelated-x"], trackerId, token,
-        LikeScript.BuildApplyAndArmRefreshKeys(["old-a", "old-b"], trackerId, token)));
+        LikeScript.BuildApplyAndArmRefreshKeys(
+            ["data-tid:old-a", "data-tid:old-b"], trackerId, token)));
     using var missingJson = JsonDocument.Parse(missingOutput);
     var missing = missingJson.RootElement.GetProperty("result");
     Require(!missing.GetProperty("anchorFound").GetBoolean() &&
@@ -272,7 +289,9 @@ static string BuildDomHarness(
     globalThis.__qzaAutomationSession = {{tokenJson}};
     globalThis.__qzaFeedTracker = {
       trackerId: {{trackerJson}}, automationToken: {{tokenJson}},
-      newKeys: new Set(), newOrder: [], bootstrapComplete: false
+      newKeys: new Set(), newOrder: [], bootstrapComplete: false,
+      keyFor: item => `data-tid:${item.getAttribute('data-tid')}`,
+      canPromoteForRefresh: () => true
     };
     const result = {{expression}};
     console.log(JSON.stringify({

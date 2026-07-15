@@ -227,7 +227,7 @@
                     <Grid Margin="28,11,28,18">
                         <TextBlock Text="QZONE ASSISTANT" Foreground="#B3A2A8" FontSize="9" />
                         <Border HorizontalAlignment="Right" CornerRadius="8" Background="#F3EAEC" Padding="7,3">
-                            <TextBlock Text="v1.10.1" Foreground="#8E7B82" FontSize="9" />
+                            <TextBlock Text="v1.10.2" Foreground="#8E7B82" FontSize="9" />
                         </Border>
                     </Grid>
                 </Border>
